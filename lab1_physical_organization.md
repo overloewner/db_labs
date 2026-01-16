@@ -14,18 +14,18 @@
 Откройте командную строку (cmd) от имени администратора:
 
 ```cmd
-mkdir C:\PostgreSQL_Tablespaces\ivanov_space
+mkdir C:\PostgreSQL_Tablespaces\tno_space
 ```
 
 **Объяснение:** В Windows 10 табличное пространство требует существующую директорию. Создаем папку для хранения файлов табличного пространства.
 
 **Шаг 2. Установка прав доступа для пользователя PostgreSQL**
 
-Щелкните правой кнопкой мыши на папке `C:\PostgreSQL_Tablespaces\ivanov_space` → Свойства → Безопасность → Изменить → Добавить → Введите "NETWORK SERVICE" (или учетную запись службы PostgreSQL) → OK → Разрешить: Полный доступ.
+Щелкните правой кнопкой мыши на папке `C:\PostgreSQL_Tablespaces\tno_space` → Свойства → Безопасность → Изменить → Добавить → Введите "NETWORK SERVICE" (или учетную запись службы PostgreSQL) → OK → Разрешить: Полный доступ.
 
 **Альтернатива через icacls:**
 ```cmd
-icacls C:\PostgreSQL_Tablespaces\ivanov_space /grant "NETWORK SERVICE:(OI)(CI)F"
+icacls C:\PostgreSQL_Tablespaces\tno_space /grant "NETWORK SERVICE:(OI)(CI)F"
 ```
 
 **Шаг 3. Подключение к PostgreSQL и создание табличного пространства**
@@ -37,8 +37,8 @@ icacls C:\PostgreSQL_Tablespaces\ivanov_space /grant "NETWORK SERVICE:(OI)(CI)F"
 psql -U postgres
 
 -- Создание табличного пространства
-CREATE TABLESPACE ivanov_space
-  LOCATION 'C:/PostgreSQL_Tablespaces/ivanov_space';
+CREATE TABLESPACE tno_space
+  LOCATION 'C:/PostgreSQL_Tablespaces/tno_space';
 ```
 
 **ВАЖНО для Windows:** Используйте прямые слэши `/` вместо обратных `\` в пути или двойные обратные слэши `\\`.
@@ -63,7 +63,7 @@ CREATE TABLESPACE
                                     List of tablespaces
       Name      |  Owner   |        Location                        | Access privileges | Options |  Size
 ----------------+----------+----------------------------------------+-------------------+---------+--------
- ivanov_space   | postgres | C:/PostgreSQL_Tablespaces/ivanov_space |                   |         | 0 bytes
+ tno_space   | postgres | C:/PostgreSQL_Tablespaces/tno_space |                   |         | 0 bytes
  pg_default     | postgres |                                        |                   |         | 7937 kB
  pg_global      | postgres |                                        |                   |         | 567 kB
 ```
@@ -83,7 +83,7 @@ CREATE TABLESPACE
 
 ```sql
 -- Создание схемы
-CREATE SCHEMA ivanov_space;
+CREATE SCHEMA tno_space;
 ```
 
 **Результат:**
@@ -106,7 +106,7 @@ CREATE SCHEMA
                           List of schemas
      Name      |  Owner   |  Access privileges   |      Description
 ---------------+----------+----------------------+------------------------
- ivanov_space  | postgres |                      |
+ tno_space  | postgres |                      |
  insurance_system | postgres |                   |
  public        | postgres | postgres=UC/postgres+| standard public schema
                |          | =UC/postgres         |
@@ -122,13 +122,13 @@ CREATE SCHEMA
 
 ### Задание 3: Наделить роль ФИО полномочиями для создания объектов
 
-**Что требуется:** Создать пользователя (роль) и дать ему права на создание объектов в схеме `ivanov_space` и табличном пространстве `ivanov_space`.
+**Что требуется:** Создать пользователя (роль) и дать ему права на создание объектов в схеме `tno_space` и табличном пространстве `tno_space`.
 
 **Шаг 1. Создание роли**
 
 ```sql
--- Создание роли ivanov с возможностью входа и паролем
-CREATE ROLE ivanov WITH LOGIN PASSWORD 'secure_password123';
+-- Создание роли tno с возможностью входа и паролем
+CREATE ROLE tno WITH LOGIN PASSWORD 'secure_password123';
 ```
 
 **Результат:**
@@ -140,14 +140,14 @@ CREATE ROLE
 
 ```sql
 -- Право использовать схему (SELECT, INSERT и т.д.)
-GRANT USAGE ON SCHEMA ivanov_space TO ivanov;
+GRANT USAGE ON SCHEMA tno_space TO tno;
 
 -- Право создавать объекты в схеме
-GRANT CREATE ON SCHEMA ivanov_space TO ivanov;
+GRANT CREATE ON SCHEMA tno_space TO tno;
 
 -- Право на все будущие таблицы в схеме
-ALTER DEFAULT PRIVILEGES IN SCHEMA ivanov_space
-  GRANT ALL ON TABLES TO ivanov;
+ALTER DEFAULT PRIVILEGES IN SCHEMA tno_space
+  GRANT ALL ON TABLES TO tno;
 ```
 
 **Результат:**
@@ -166,7 +166,7 @@ ALTER DEFAULT PRIVILEGES
 
 ```sql
 -- Право создавать объекты в табличном пространстве
-GRANT CREATE ON TABLESPACE ivanov_space TO ivanov;
+GRANT CREATE ON TABLESPACE tno_space TO tno;
 ```
 
 **Результат:**
@@ -176,7 +176,7 @@ GRANT
 
 **Проверка прав:**
 ```sql
-\du ivanov
+\du tno
 ```
 
 **Вывод:**
@@ -184,7 +184,7 @@ GRANT
                                    List of roles
  Role name |                         Attributes                         | Member of
 -----------+------------------------------------------------------------+-----------
- ivanov    |                                                            | {}
+ tno    |                                                            | {}
 ```
 
 ---
@@ -203,8 +203,8 @@ GRANT
                           List of schemas
      Name      |  Owner   |  Access privileges   |      Description
 ---------------+----------+----------------------+------------------------
- ivanov_space  | postgres | postgres=UC/postgres+|
-               |          | ivanov=UC/postgres   |
+ tno_space  | postgres | postgres=UC/postgres+|
+               |          | tno=UC/postgres   |
  insurance_system | postgres | postgres=UC/postgres | курсовая БД
  public        | postgres | postgres=UC/postgres+| standard public schema
                |          | =UC/postgres         |
@@ -220,8 +220,8 @@ GRANT
                                      List of tablespaces
       Name      |  Owner   |        Location                        | Access privileges | Options |  Size
 ----------------+----------+----------------------------------------+-------------------+---------+--------
- ivanov_space   | postgres | C:/PostgreSQL_Tablespaces/ivanov_space | postgres=C/postgres+|       | 0 bytes
-                |          |                                        | ivanov=C/postgres |         |
+ tno_space   | postgres | C:/PostgreSQL_Tablespaces/tno_space | postgres=C/postgres+|       | 0 bytes
+                |          |                                        | tno=C/postgres |         |
  pg_default     | postgres |                                        |                   |         | 7937 kB
  pg_global      | postgres |                                        |                   |         | 567 kB
 ```
@@ -236,30 +236,30 @@ GRANT
 ### Задание 5: Создать три таблицы под пользователем ФИО
 
 **Что требуется:**
-1. Таблица `ivanov_toast` — будет использовать механизм TOAST
-2. Таблица `ivanov_no_toast` — без механизма TOAST
-3. Таблица `ivanov_no_log` — нежурналируемая таблица
+1. Таблица `tno_toast` — будет использовать механизм TOAST
+2. Таблица `tno_no_toast` — без механизма TOAST
+3. Таблица `tno_no_log` — нежурналируемая таблица
 
-**Шаг 1. Подключение под пользователем ivanov**
+**Шаг 1. Подключение под пользователем tno**
 
 В новом окне psql:
 ```cmd
-psql -U ivanov -d postgres
+psql -U tno -d postgres
 ```
 
 Или в существующей сессии:
 ```sql
-\c postgres ivanov
+\c postgres tno
 ```
 
 **Шаг 2. Установка рабочей схемы и табличного пространства**
 
 ```sql
 -- Установить схему по умолчанию
-SET search_path TO ivanov_space;
+SET search_path TO tno_space;
 
 -- Установить табличное пространство по умолчанию
-SET default_tablespace = ivanov_space;
+SET default_tablespace = tno_space;
 
 -- Проверка текущих настроек
 SHOW search_path;
@@ -270,24 +270,24 @@ SHOW default_tablespace;
 ```
   search_path
 ----------------
- ivanov_space
+ tno_space
 
  default_tablespace
 --------------------
- ivanov_space
+ tno_space
 ```
 
-**Шаг 3. Создание таблицы ivanov_toast (с механизмом TOAST)**
+**Шаг 3. Создание таблицы tno_toast (с механизмом TOAST)**
 
 ```sql
 -- Таблица с большими текстовыми полями (будет использовать TOAST)
-CREATE TABLE ivanov_toast (
+CREATE TABLE tno_toast (
     id SERIAL PRIMARY KEY,
     title VARCHAR(200),
     content TEXT,  -- Большие текстовые данные
     large_data TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) TABLESPACE ivanov_space;
+) TABLESPACE tno_space;
 ```
 
 **Результат:**
@@ -300,17 +300,17 @@ CREATE TABLE
 - PostgreSQL автоматически использует TOAST для значений > 2KB
 - TOAST (The Oversized-Attribute Storage Technique) — механизм хранения больших значений вне основной таблицы
 
-**Шаг 4. Создание таблицы ivanov_no_toast (без TOAST)**
+**Шаг 4. Создание таблицы tno_no_toast (без TOAST)**
 
 ```sql
 -- Таблица только с короткими полями (TOAST не нужен)
-CREATE TABLE ivanov_no_toast (
+CREATE TABLE tno_no_toast (
     id SERIAL PRIMARY KEY,
     code CHAR(10),      -- Фиксированная длина
     name VARCHAR(50),   -- Короткая строка
     value INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) TABLESPACE ivanov_space;
+) TABLESPACE tno_space;
 ```
 
 **Результат:**
@@ -323,16 +323,16 @@ CREATE TABLE
 - Строка не может превысить размер страницы (8KB)
 - PostgreSQL не создаст TOAST-таблицу для такой структуры
 
-**Шаг 5. Создание нежурналируемой таблицы ivanov_no_log**
+**Шаг 5. Создание нежурналируемой таблицы tno_no_log**
 
 ```sql
 -- Нежурналируемая таблица (UNLOGGED)
-CREATE UNLOGGED TABLE ivanov_no_log (
+CREATE UNLOGGED TABLE tno_no_log (
     id SERIAL PRIMARY KEY,
     log_message TEXT,
     log_level VARCHAR(20),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-) TABLESPACE ivanov_space;
+) TABLESPACE tno_space;
 ```
 
 **Результат:**
@@ -355,7 +355,7 @@ CREATE TABLE
 **Что требуется:** Посмотреть список созданных таблиц с подробной информацией.
 
 ```sql
-\dt+ ivanov_space.*
+\dt+ tno_space.*
 ```
 
 **Вывод:**
@@ -363,9 +363,9 @@ CREATE TABLE
                                         List of relations
     Schema     |      Name       | Type  |  Owner  | Persistence |  Size   | Description
 ---------------+-----------------+-------+---------+-------------+---------+-------------
- ivanov_space  | ivanov_no_log   | table | ivanov  | unlogged    | 0 bytes |
- ivanov_space  | ivanov_no_toast | table | ivanov  | permanent   | 0 bytes |
- ivanov_space  | ivanov_toast    | table | ivanov  | permanent   | 0 bytes |
+ tno_space  | tno_no_log   | table | tno  | unlogged    | 0 bytes |
+ tno_space  | tno_no_toast | table | tno  | permanent   | 0 bytes |
+ tno_space  | tno_toast    | table | tno  | permanent   | 0 bytes |
 ```
 
 **Объяснение колонок:**
@@ -382,22 +382,22 @@ CREATE TABLE
 **Дополнительно: Просмотр структуры таблиц**
 
 ```sql
-\d+ ivanov_space.ivanov_toast
+\d+ tno_space.tno_toast
 ```
 
 **Вывод:**
 ```
-                                           Table "ivanov_space.ivanov_toast"
+                                           Table "tno_space.tno_toast"
    Column   |            Type             | Collation | Nullable |                  Default                  | Storage  | Stats target | Description
 ------------+-----------------------------+-----------+----------+-------------------------------------------+----------+--------------+-------------
- id         | integer                     |           | not null | nextval('ivanov_toast_id_seq'::regclass) | plain    |              |
+ id         | integer                     |           | not null | nextval('tno_toast_id_seq'::regclass) | plain    |              |
  title      | character varying(200)      |           |          |                                           | extended |              |
  content    | text                        |           |          |                                           | extended |              |
  large_data | text                        |           |          |                                           | extended |              |
  created_at | timestamp without time zone |           |          | CURRENT_TIMESTAMP                         | plain    |              |
 Indexes:
-    "ivanov_toast_pkey" PRIMARY KEY, btree (id)
-Tablespace: "ivanov_space"
+    "tno_toast_pkey" PRIMARY KEY, btree (id)
+Tablespace: "tno_space"
 ```
 
 **Объяснение Storage:**
@@ -422,17 +422,17 @@ SELECT
     pg_relation_filepath(c.oid) AS file_path,
     c.reltoastrelid::regclass AS toast_table
 FROM pg_class c
-WHERE c.relname IN ('ivanov_toast', 'ivanov_no_toast', 'ivanov_no_log')
-  AND c.relnamespace = 'ivanov_space'::regnamespace;
+WHERE c.relname IN ('tno_toast', 'tno_no_toast', 'tno_no_log')
+  AND c.relnamespace = 'tno_space'::regnamespace;
 ```
 
 **Вывод:**
 ```
    table_name    | relfilenode |                file_path                 |        toast_table
 -----------------+-------------+------------------------------------------+---------------------------
- ivanov_toast    |       16434 | pg_tblspc/16385/PG_14_202107181/13394/16434 | ivanov_space.pg_toast_16434
- ivanov_no_toast |       16440 | pg_tblspc/16385/PG_14_202107181/13394/16440 |
- ivanov_no_log   |       16446 | pg_tblspc/16385/PG_14_202107181/13394/16446 | ivanov_space.pg_toast_16446
+ tno_toast    |       16434 | pg_tblspc/16385/PG_14_202107181/13394/16434 | tno_space.pg_toast_16434
+ tno_no_toast |       16440 | pg_tblspc/16385/PG_14_202107181/13394/16440 |
+ tno_no_log   |       16446 | pg_tblspc/16385/PG_14_202107181/13394/16446 | tno_space.pg_toast_16446
 ```
 
 **Объяснение колонок:**
@@ -452,13 +452,13 @@ WHERE c.relname IN ('ivanov_toast', 'ivanov_no_toast', 'ivanov_no_log')
 Откройте командную строку:
 
 ```cmd
-cd C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_*\13394\
+cd C:\PostgreSQL_Tablespaces\tno_space\PG_14_*\13394\
 dir
 ```
 
 **Вывод:**
 ```
-Directory of C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_202107181\13394
+Directory of C:\PostgreSQL_Tablespaces\tno_space\PG_14_202107181\13394
 
 16.01.2026  10:30             8 192 16434
 16.01.2026  10:30             8 192 16434_fsm
@@ -472,7 +472,7 @@ Directory of C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_202107181\13394
 
 **Описание файлов:**
 
-**16434** — основной файл таблицы `ivanov_toast`
+**16434** — основной файл таблицы `tno_toast`
 - Содержит данные строк таблицы
 - Размер: 8 KB (одна страница)
 - Формат: страницы по 8KB с заголовками и кортежами
@@ -485,7 +485,7 @@ Directory of C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_202107181\13394
 - Отмечает страницы, где все кортежи видимы для всех транзакций
 - Оптимизирует VACUUM (пропускает такие страницы)
 
-**16435** — TOAST-таблица для `ivanov_toast`
+**16435** — TOAST-таблица для `tno_toast`
 - Хранит большие значения полей (> 2KB)
 - Автоматически создается PostgreSQL
 - Формат: `pg_toast_<OID основной таблицы>`
@@ -495,23 +495,23 @@ Directory of C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_202107181\13394
 **16436** — индекс TOAST-таблицы
 - Обеспечивает быстрый поиск chunks в TOAST
 
-**16440** — файл таблицы `ivanov_no_toast`
+**16440** — файл таблицы `tno_no_toast`
 - Нет файлов TOAST (таблица не требует)
 
-**16446** — файл таблицы `ivanov_no_log`
+**16446** — файл таблицы `tno_no_log`
 - UNLOGGED таблица также имеет TOAST (если нужен)
 
 **Альтернатива (через PostgreSQL функции):**
 
 ```sql
 -- Размер основного файла
-SELECT pg_relation_size('ivanov_space.ivanov_toast', 'main') AS main_fork;
+SELECT pg_relation_size('tno_space.tno_toast', 'main') AS main_fork;
 
 -- Размер FSM
-SELECT pg_relation_size('ivanov_space.ivanov_toast', 'fsm') AS fsm_fork;
+SELECT pg_relation_size('tno_space.tno_toast', 'fsm') AS fsm_fork;
 
 -- Размер VM
-SELECT pg_relation_size('ivanov_space.ivanov_toast', 'vm') AS vm_fork;
+SELECT pg_relation_size('tno_space.tno_toast', 'vm') AS vm_fork;
 ```
 
 **Вывод:**
@@ -535,11 +535,11 @@ SELECT pg_relation_size('ivanov_space.ivanov_toast', 'vm') AS vm_fork;
 
 **Что требуется:** Вставить достаточно данных, чтобы активировать TOAST и увидеть изменение размеров файлов.
 
-**Шаг 1. Заполнение таблицы ivanov_toast (активация TOAST)**
+**Шаг 1. Заполнение таблицы tno_toast (активация TOAST)**
 
 ```sql
 -- Вставка 10000 строк с большими текстовыми данными
-INSERT INTO ivanov_space.ivanov_toast (title, content, large_data)
+INSERT INTO tno_space.tno_toast (title, content, large_data)
 SELECT
     'Article ' || i AS title,
     repeat('This is a long content. ', 1000) AS content,  -- ~25 KB
@@ -557,11 +557,11 @@ INSERT 0 10000
 - `repeat('текст', N)` — повторяет строку N раз
 - Каждая строка имеет ~60KB данных, что гарантирует использование TOAST
 
-**Шаг 2. Заполнение таблицы ivanov_no_toast**
+**Шаг 2. Заполнение таблицы tno_no_toast**
 
 ```sql
 -- Вставка 10000 строк с короткими данными
-INSERT INTO ivanov_space.ivanov_no_toast (code, name, value)
+INSERT INTO tno_space.tno_no_toast (code, name, value)
 SELECT
     'CODE' || lpad(i::text, 6, '0'),  -- CODE000001, CODE000002, ...
     'Item ' || i,
@@ -574,11 +574,11 @@ FROM generate_series(1, 10000) AS i;
 INSERT 0 10000
 ```
 
-**Шаг 3. Заполнение нежурналируемой таблицы ivanov_no_log**
+**Шаг 3. Заполнение нежурналируемой таблицы tno_no_log**
 
 ```sql
 -- Вставка логов
-INSERT INTO ivanov_space.ivanov_no_log (log_message, log_level)
+INSERT INTO tno_space.tno_no_log (log_message, log_level)
 SELECT
     'Log entry number ' || i || ': ' || md5(random()::text),
     CASE (i % 4)
@@ -598,28 +598,28 @@ INSERT 0 50000
 **Проверка количества строк:**
 ```sql
 SELECT
-    'ivanov_toast' AS table_name,
+    'tno_toast' AS table_name,
     COUNT(*) AS row_count
-FROM ivanov_space.ivanov_toast
+FROM tno_space.tno_toast
 UNION ALL
 SELECT
-    'ivanov_no_toast',
+    'tno_no_toast',
     COUNT(*)
-FROM ivanov_space.ivanov_no_toast
+FROM tno_space.tno_no_toast
 UNION ALL
 SELECT
-    'ivanov_no_log',
+    'tno_no_log',
     COUNT(*)
-FROM ivanov_space.ivanov_no_log;
+FROM tno_space.tno_no_log;
 ```
 
 **Вывод:**
 ```
    table_name    | row_count
 -----------------+-----------
- ivanov_toast    |     10000
- ivanov_no_toast |     10000
- ivanov_no_log   |     50000
+ tno_toast    |     10000
+ tno_no_toast |     10000
+ tno_no_log   |     50000
 ```
 
 ---
@@ -641,8 +641,8 @@ SELECT
     pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
     c.reltoastrelid::regclass AS toast_table
 FROM pg_class c
-WHERE c.relname IN ('ivanov_toast', 'ivanov_no_toast', 'ivanov_no_log')
-  AND c.relnamespace = 'ivanov_space'::regnamespace
+WHERE c.relname IN ('tno_toast', 'tno_no_toast', 'tno_no_log')
+  AND c.relnamespace = 'tno_space'::regnamespace
 ORDER BY c.relname;
 ```
 
@@ -650,9 +650,9 @@ ORDER BY c.relname;
 ```
    table_name    | main_size | fsm_size | vm_size | indexes_size | toast_size | total_size |        toast_table
 -----------------+-----------+----------+---------+--------------+------------+------------+---------------------------
- ivanov_no_log   | 3272 kB   | 24 kB    | 8192 bytes | 1080 kB   | 0 bytes    | 4352 kB    | ivanov_space.pg_toast_16446
- ivanov_no_toast | 504 kB    | 24 kB    | 8192 bytes | 232 kB    | 0 bytes    | 736 kB     | -
- ivanov_toast    | 472 kB    | 24 kB    | 8192 bytes | 232 kB    | 562 MB     | 562 MB     | ivanov_space.pg_toast_16434
+ tno_no_log   | 3272 kB   | 24 kB    | 8192 bytes | 1080 kB   | 0 bytes    | 4352 kB    | tno_space.pg_toast_16446
+ tno_no_toast | 504 kB    | 24 kB    | 8192 bytes | 232 kB    | 0 bytes    | 736 kB     | -
+ tno_toast    | 472 kB    | 24 kB    | 8192 bytes | 232 kB    | 562 MB     | 562 MB     | tno_space.pg_toast_16434
 ```
 
 **Объяснение колонок:**
@@ -665,18 +665,18 @@ ORDER BY c.relname;
 - `toast_table` — имя TOAST-таблицы
 
 **Анализ:**
-- `ivanov_toast`: Основная таблица 472 KB, но TOAST занимает 562 MB! Большие текстовые данные вынесены в TOAST.
-- `ivanov_no_toast`: Только 504 KB, нет TOAST (короткие данные).
-- `ivanov_no_log`: 3272 KB основной файл, нет больших данных в TOAST.
+- `tno_toast`: Основная таблица 472 KB, но TOAST занимает 562 MB! Большие текстовые данные вынесены в TOAST.
+- `tno_no_toast`: Только 504 KB, нет TOAST (короткие данные).
+- `tno_no_log`: 3272 KB основной файл, нет больших данных в TOAST.
 
 **Шаг 2. Детальная информация по TOAST**
 
 ```sql
--- Для таблицы ivanov_toast
+-- Для таблицы tno_toast
 SELECT
-    pg_size_pretty(pg_relation_size('ivanov_space.ivanov_toast')) AS main_table,
-    pg_size_pretty(pg_relation_size('ivanov_space.pg_toast_16434')) AS toast_table,
-    pg_size_pretty(pg_indexes_size('ivanov_space.pg_toast_16434')) AS toast_index;
+    pg_size_pretty(pg_relation_size('tno_space.tno_toast')) AS main_table,
+    pg_size_pretty(pg_relation_size('tno_space.pg_toast_16434')) AS toast_table,
+    pg_size_pretty(pg_indexes_size('tno_space.pg_toast_16434')) AS toast_index;
 ```
 
 **Вывод:**
@@ -691,7 +691,7 @@ SELECT
 Откройте PowerShell:
 
 ```powershell
-cd C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_*\13394\
+cd C:\PostgreSQL_Tablespaces\tno_space\PG_14_*\13394\
 Get-ChildItem | Select-Object Name, Length | Format-Table -AutoSize
 ```
 
@@ -699,17 +699,17 @@ Get-ChildItem | Select-Object Name, Length | Format-Table -AutoSize
 ```
 Name         Length
 ----         ------
-16434        482304     (472 KB - ivanov_toast main)
+16434        482304     (472 KB - tno_toast main)
 16434_fsm     24576     (24 KB  - FSM)
 16434_vm       8192     (8 KB   - VM)
 16435      582778880    (555 MB - TOAST table)
 16435_fsm     24576     (24 KB  - TOAST FSM)
 16436        6447104    (6.1 MB - TOAST index)
 16437         237568    (232 KB - primary key index)
-16440         516096    (504 KB - ivanov_no_toast)
+16440         516096    (504 KB - tno_no_toast)
 16440_fsm      24576
 16441         237568    (232 KB - index)
-16446        3350528    (3.2 MB - ivanov_no_log)
+16446        3350528    (3.2 MB - tno_no_log)
 16446_fsm      24576
 16447        1105920    (1 MB   - index)
 ```
@@ -729,16 +729,16 @@ SELECT
     t.difference
 FROM (
     SELECT
-        'ivanov_toast (main)' AS table_name,
-        pg_relation_size('ivanov_space.ivanov_toast') AS sql_size,
+        'tno_toast (main)' AS table_name,
+        pg_relation_size('tno_space.tno_toast') AS sql_size,
         482304 AS os_size_bytes,  -- из dir команды
-        pg_relation_size('ivanov_space.ivanov_toast') - 482304 AS difference
+        pg_relation_size('tno_space.tno_toast') - 482304 AS difference
     UNION ALL
     SELECT
-        'ivanov_toast (TOAST)',
-        pg_relation_size('ivanov_space.pg_toast_16434'),
+        'tno_toast (TOAST)',
+        pg_relation_size('tno_space.pg_toast_16434'),
         582778880,
-        pg_relation_size('ivanov_space.pg_toast_16434') - 582778880
+        pg_relation_size('tno_space.pg_toast_16434') - 582778880
 ) t;
 ```
 
@@ -746,8 +746,8 @@ FROM (
 ```
        table_name        | sql_size  | os_size_bytes | difference
 -------------------------+-----------+---------------+------------
- ivanov_toast (main)     |    482304 |        482304 |          0
- ivanov_toast (TOAST)    | 582778880 |     582778880 |          0
+ tno_toast (main)     |    482304 |        482304 |          0
+ tno_toast (TOAST)    | 582778880 |     582778880 |          0
 ```
 
 **Вывод:** Размеры полностью совпадают! SQL-функции точно отражают физические размеры файлов.
