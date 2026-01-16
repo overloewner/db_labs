@@ -1,1010 +1,1111 @@
-# Лабораторная работа №4: Триггеры в PostgreSQL
+# Лабораторная работа 4: Триггеры в PostgreSQL
 
-## Краткая последовательность команд
+## Задание 1: Система журналирования обращений к таблице (DML-триггеры)
+
+**Что требуется:**
+Реализовать в PostgreSQL систему журналирования обращений к таблице. Создать универсальную триггерную функцию, которая будет логировать операции UPDATE, INSERT, DELETE в отдельную таблицу аудита. Система должна учитывать: кто выполнил операцию, время, тип операции, целевую таблицу, схему, старую и новую версии строки. Таблица с логами должна находиться в отдельной схеме. Доступ к таблицам логов должен быть только у администратора (не суперпользователь). Для логов использовать формат JSON. Реализовать цифровую подпись логов (с помощью pgcrypto). Хранить хэши записей для обнаружения подмен.
+
+---
+
+### Шаг 1: Подготовка окружения и расширений
+
+#### Последовательность команд
 
 ```sql
--- 1. Создание базы данных
-CREATE DATABASE lab4_triggers;
-\c lab4_triggers
+-- В psql от имени postgres (суперпользователь)
 
--- 2. Создание основной таблицы
-CREATE TABLE products (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    price DECIMAL(10,2) NOT NULL,
-    stock INT NOT NULL DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+-- Устанавливаем расширение для криптографии
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- 3. Создание таблицы аудита
-CREATE TABLE products_audit (
-    audit_id SERIAL PRIMARY KEY,
-    operation CHAR(1) NOT NULL,  -- I, U, D
-    product_id INT NOT NULL,
-    old_data JSONB,
-    new_data JSONB,
-    changed_by VARCHAR(100),
-    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+-- Создаем отдельную схему для логов аудита
+CREATE SCHEMA IF NOT EXISTS audit;
 
--- 4. Создание триггерной функции BEFORE INSERT
-CREATE OR REPLACE FUNCTION validate_product_before_insert()
-RETURNS TRIGGER AS $$
-BEGIN
-    -- Проверка цены
-    IF NEW.price <= 0 THEN
-        RAISE EXCEPTION 'Цена должна быть положительной';
-    END IF;
+-- Создаем роль администратора (не суперпользователь)
+CREATE ROLE tno_admin WITH LOGIN PASSWORD 'secure_password';
 
-    -- Проверка количества
-    IF NEW.stock < 0 THEN
-        RAISE EXCEPTION 'Количество не может быть отрицательным';
-    END IF;
+-- Даем администратору права на использование схемы audit
+GRANT USAGE ON SCHEMA audit TO tno_admin;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA audit TO tno_admin;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA audit TO tno_admin;
 
-    -- Преобразование имени к нормальному виду
-    NEW.name := INITCAP(TRIM(NEW.name));
+-- Устанавливаем права по умолчанию для будущих объектов в схеме audit
+ALTER DEFAULT PRIVILEGES IN SCHEMA audit GRANT ALL ON TABLES TO tno_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA audit GRANT ALL ON SEQUENCES TO tno_admin;
+```
 
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+#### Детальное объяснение каждой команды
 
--- 5. Создание BEFORE INSERT триггера
-CREATE TRIGGER trg_validate_product_before_insert
-    BEFORE INSERT ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION validate_product_before_insert();
+1. **`CREATE EXTENSION IF NOT EXISTS pgcrypto;`**
+   - Устанавливает расширение pgcrypto в базу данных
+   - `pgcrypto` предоставляет криптографические функции: хеширование (MD5, SHA1, SHA256), шифрование, генерацию случайных данных
+   - `IF NOT EXISTS` - не вызывает ошибку, если расширение уже установлено
+   - Используется для создания цифровых подписей логов
 
--- 6. Тестирование BEFORE INSERT триггера
-INSERT INTO products (name, price, stock)
-VALUES ('laptop', 1000.00, 10);  -- name будет преобразовано в "Laptop"
+2. **`CREATE SCHEMA IF NOT EXISTS audit;`**
+   - Создает отдельную схему (namespace) для хранения таблиц аудита
+   - Схема - это логический контейнер для объектов БД (таблицы, функции, представления)
+   - Изоляция данных аудита от основных данных
+   - `IF NOT EXISTS` - предотвращает ошибку при повторном выполнении
 
--- Попытка вставить некорректные данные
-INSERT INTO products (name, price, stock)
-VALUES ('mouse', -50.00, 5);  -- ОШИБКА: цена отрицательная
+3. **`CREATE ROLE tno_admin WITH LOGIN PASSWORD 'secure_password';`**
+   - Создает новую роль (пользователя) с именем tno_admin
+   - `WITH LOGIN` - позволяет роли входить в систему (без этого это просто группа)
+   - `PASSWORD` - устанавливает пароль для аутентификации
+   - Это НЕ суперпользователь - имеет ограниченные права только на схему audit
 
--- 7. Создание триггерной функции BEFORE UPDATE
-CREATE OR REPLACE FUNCTION update_timestamp()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at := CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+4. **`GRANT USAGE ON SCHEMA audit TO tno_admin;`**
+   - Дает право использовать схему audit (видеть объекты в ней)
+   - `USAGE` - базовая привилегия для доступа к схеме
+   - Без USAGE пользователь не сможет обращаться к объектам схемы
 
--- 8. Создание BEFORE UPDATE триггера
-CREATE TRIGGER trg_update_timestamp
-    BEFORE UPDATE ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION update_timestamp();
+5. **`GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA audit TO tno_admin;`**
+   - Дает все права (SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER) на все существующие таблицы в схеме audit
+   - `ALL PRIVILEGES` включает: SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+   - Применяется только к уже существующим таблицам
 
--- 9. Тестирование BEFORE UPDATE триггера
-UPDATE products SET price = 1100.00 WHERE name = 'Laptop';
-SELECT * FROM products WHERE name = 'Laptop';  -- updated_at обновлен
+6. **`GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA audit TO tno_admin;`**
+   - Дает права на последовательности (sequences) в схеме audit
+   - Последовательности используются для SERIAL/BIGSERIAL полей (автоинкремент)
+   - Необходимо для вставки данных в таблицы с SERIAL полями
 
--- 10. Создание триггерной функции AFTER для аудита
-CREATE OR REPLACE FUNCTION audit_product_changes()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        INSERT INTO products_audit (operation, product_id, new_data, changed_by)
-        VALUES ('I', NEW.id, row_to_json(NEW)::jsonb, current_user);
-        RETURN NEW;
-    ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO products_audit (operation, product_id, old_data, new_data, changed_by)
-        VALUES ('U', NEW.id, row_to_json(OLD)::jsonb, row_to_json(NEW)::jsonb, current_user);
-        RETURN NEW;
-    ELSIF TG_OP = 'DELETE' THEN
-        INSERT INTO products_audit (operation, product_id, old_data, changed_by)
-        VALUES ('D', OLD.id, row_to_json(OLD)::jsonb, current_user);
-        RETURN OLD;
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
+7. **`ALTER DEFAULT PRIVILEGES IN SCHEMA audit GRANT ALL ON TABLES TO tno_admin;`**
+   - Устанавливает права по умолчанию для БУДУЩИХ таблиц в схеме audit
+   - Когда postgres создаст новую таблицу в audit, tno_admin автоматически получит все права
+   - Без этой команды пришлось бы явно давать права после создания каждой таблицы
 
--- 11. Создание AFTER триггеров
-CREATE TRIGGER trg_audit_product_insert
-    AFTER INSERT ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION audit_product_changes();
+#### Проверка установленных прав
 
-CREATE TRIGGER trg_audit_product_update
-    AFTER UPDATE ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION audit_product_changes();
+```sql
+-- Проверяем список ролей и их атрибуты
+\du
 
-CREATE TRIGGER trg_audit_product_delete
-    AFTER DELETE ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION audit_product_changes();
+-- Проверяем список схем и права на них
+\dn+
 
--- 12. Тестирование AFTER триггеров
-INSERT INTO products (name, price, stock)
-VALUES ('Mouse', 25.00, 100);
-
-UPDATE products SET price = 30.00 WHERE name = 'Mouse';
-
-DELETE FROM products WHERE name = 'Mouse';
-
--- Просмотр аудита
-SELECT * FROM products_audit ORDER BY changed_at;
-
--- 13. Создание таблицы заказов
-CREATE TABLE orders (
-    id SERIAL PRIMARY KEY,
-    product_id INT REFERENCES products(id),
-    quantity INT NOT NULL,
-    order_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 14. Триггерная функция для обновления складских остатков
-CREATE OR REPLACE FUNCTION update_stock_on_order()
-RETURNS TRIGGER AS $$
-BEGIN
-    -- Проверяем наличие товара на складе
-    IF (SELECT stock FROM products WHERE id = NEW.product_id) < NEW.quantity THEN
-        RAISE EXCEPTION 'Недостаточно товара на складе';
-    END IF;
-
-    -- Уменьшаем количество товара
-    UPDATE products
-    SET stock = stock - NEW.quantity
-    WHERE id = NEW.product_id;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- 15. Создание триггера для заказов
-CREATE TRIGGER trg_update_stock_on_order
-    AFTER INSERT ON orders
-    FOR EACH ROW
-    EXECUTE FUNCTION update_stock_on_order();
-
--- 16. Тестирование триггера заказов
-INSERT INTO orders (product_id, quantity)
-VALUES (1, 2);  -- Уменьшит stock на 2
-
-SELECT * FROM products WHERE id = 1;  -- stock уменьшился
-
--- 17. Создание представления
-CREATE VIEW product_summary AS
-SELECT id, name, price, stock
-FROM products;
-
--- 18. Триггерная функция INSTEAD OF для представления
-CREATE OR REPLACE FUNCTION update_product_via_view()
-RETURNS TRIGGER AS $$
-BEGIN
-    UPDATE products
-    SET name = NEW.name,
-        price = NEW.price,
-        stock = NEW.stock
-    WHERE id = NEW.id;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- 19. Создание INSTEAD OF триггера
-CREATE TRIGGER trg_update_product_view
-    INSTEAD OF UPDATE ON product_summary
-    FOR EACH ROW
-    EXECUTE FUNCTION update_product_via_view();
-
--- 20. Тестирование INSTEAD OF триггера
-UPDATE product_summary
-SET price = 1200.00
-WHERE name = 'Laptop';
-
--- 21. Триггер с условием WHEN
-CREATE OR REPLACE FUNCTION log_price_increase()
-RETURNS TRIGGER AS $$
-BEGIN
-    RAISE NOTICE 'Цена товара % увеличена с % на %',
-        NEW.name, OLD.price, NEW.price;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_log_price_increase
-    BEFORE UPDATE ON products
-    FOR EACH ROW
-    WHEN (NEW.price > OLD.price)
-    EXECUTE FUNCTION log_price_increase();
-
--- 22. Тестирование условного триггера
-UPDATE products SET price = 1300.00 WHERE name = 'Laptop';  -- Триггер сработает
-UPDATE products SET price = 1200.00 WHERE name = 'Laptop';  -- Триггер НЕ сработает
-
--- 23. Операторный триггер (STATEMENT-level)
-CREATE OR REPLACE FUNCTION log_table_modification()
-RETURNS TRIGGER AS $$
-BEGIN
-    RAISE NOTICE 'Выполнена операция % на таблице products', TG_OP;
-    RETURN NULL;  -- Для STATEMENT триггеров значение игнорируется
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_log_table_modification
-    AFTER INSERT OR UPDATE OR DELETE ON products
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION log_table_modification();
-
--- 24. Тестирование операторного триггера
-INSERT INTO products (name, price, stock)
-VALUES ('Keyboard', 75.00, 50), ('Monitor', 300.00, 20);
--- Триггер сработает один раз, хотя вставлено две строки
-
--- 25. Просмотр триггеров
+-- Проверяем права tno_admin на схему audit
 SELECT
-    trigger_name,
-    event_manipulation,
-    event_object_table,
-    action_timing,
-    action_orientation
-FROM information_schema.triggers
-WHERE event_object_table = 'products'
-ORDER BY trigger_name;
-
--- 26. Просмотр триггерных функций
-\df+ validate_product_before_insert
-
--- 27. Отключение триггера
-ALTER TABLE products DISABLE TRIGGER trg_validate_product_before_insert;
-
--- 28. Включение триггера
-ALTER TABLE products ENABLE TRIGGER trg_validate_product_before_insert;
-
--- 29. Удаление триггера
-DROP TRIGGER IF EXISTS trg_log_price_increase ON products;
-
--- 30. Удаление триггерной функции
-DROP FUNCTION IF EXISTS log_price_increase();
+    nspname AS schema_name,
+    pg_catalog.has_schema_privilege('tno_admin', nspname, 'USAGE') AS has_usage,
+    pg_catalog.has_schema_privilege('tno_admin', nspname, 'CREATE') AS has_create
+FROM pg_catalog.pg_namespace
+WHERE nspname = 'audit';
 ```
 
----
+#### Объяснение результатов
 
-## Подробное объяснение команд
-
-### 1-2. Создание тестовой среды
-
-```sql
-CREATE DATABASE lab4_triggers;
-\c lab4_triggers
-
-CREATE TABLE products (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    price DECIMAL(10,2) NOT NULL,
-    stock INT NOT NULL DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+**Результат \du:**
+```
+                                   List of roles
+ Role name  |                         Attributes                         | Member of
+------------+------------------------------------------------------------+-----------
+ postgres   | Superuser, Create role, Create DB, Replication, Bypass RLS| {}
+ tno_admin  |                                                            | {}
 ```
 
-**Что делает:** Создает базу данных и таблицу товаров для демонстрации триггеров.
-
-**Поля таблицы:**
-- `id` — уникальный идентификатор
-- `name` — название товара
-- `price` — цена
-- `stock` — количество на складе
-- `created_at`, `updated_at` — метки времени
-
----
-
-### 3. Создание таблицы аудита
-
-```sql
-CREATE TABLE products_audit (
-    audit_id SERIAL PRIMARY KEY,
-    operation CHAR(1) NOT NULL,
-    product_id INT NOT NULL,
-    old_data JSONB,
-    new_data JSONB,
-    changed_by VARCHAR(100),
-    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+**Результат проверки прав:**
 ```
-
-**Что делает:** Создает таблицу для хранения истории изменений.
-
-**Объяснение полей:**
-- `audit_id` — уникальный ID записи аудита
-- `operation` — тип операции: 'I' (INSERT), 'U' (UPDATE), 'D' (DELETE)
-- `product_id` — ID измененного товара
-- `old_data` — состояние до изменения (JSONB для гибкости)
-- `new_data` — состояние после изменения
-- `changed_by` — пользователь, выполнивший изменение
-- `changed_at` — время изменения
-
-**Концепция:** Таблицы аудита — распространенная практика для отслеживания всех изменений данных в критичных системах.
-
----
-
-### 4. Создание триггерной функции BEFORE INSERT
-
-```sql
-CREATE OR REPLACE FUNCTION validate_product_before_insert()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.price <= 0 THEN
-        RAISE EXCEPTION 'Цена должна быть положительной';
-    END IF;
-
-    IF NEW.stock < 0 THEN
-        RAISE EXCEPTION 'Количество не может быть отрицательным';
-    END IF;
-
-    NEW.name := INITCAP(TRIM(NEW.name));
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Что делает:** Создает функцию для валидации и модификации данных перед вставкой.
-
-**Объяснение компонентов:**
-
-**`RETURNS TRIGGER`** — функция возвращает специальный тип TRIGGER
-
-**`$$...$$`** — разделители тела функции (альтернатива одинарным кавычкам)
-
-**`NEW`** — специальная переменная, содержащая новую версию строки:
-- Для INSERT: содержит вставляемую строку
-- Для UPDATE: содержит обновленную версию
-- Для DELETE: не определена
-
-**`OLD`** — специальная переменная, содержащая старую версию строки:
-- Для INSERT: не определена
-- Для UPDATE: содержит версию до обновления
-- Для DELETE: содержит удаляемую строку
-
-**`RAISE EXCEPTION`** — выбрасывает ошибку и откатывает транзакцию
-
-**`INITCAP()`** — преобразует первую букву каждого слова в верхний регистр
-
-**`TRIM()`** — удаляет пробелы в начале и конце строки
-
-**`RETURN NEW`** — возвращает измененную версию строки, которая будет вставлена
-
-**Концепция:** BEFORE триггеры могут модифицировать данные перед их сохранением, реализуя валидацию и нормализацию на уровне базы данных.
-
----
-
-### 5. Создание BEFORE INSERT триггера
-
-```sql
-CREATE TRIGGER trg_validate_product_before_insert
-    BEFORE INSERT ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION validate_product_before_insert();
-```
-
-**Что делает:** Связывает триггерную функцию с таблицей и событием.
-
-**Объяснение компонентов:**
-- `CREATE TRIGGER trg_validate_product_before_insert` — имя триггера (префикс `trg_` — соглашение)
-- `BEFORE INSERT` — триггер срабатывает ДО вставки
-- `ON products` — таблица, на которой создается триггер
-- `FOR EACH ROW` — триггер срабатывает для каждой строки
-- `EXECUTE FUNCTION validate_product_before_insert()` — вызываемая функция
-
-**Альтернатива: FOR EACH STATEMENT** — триггер срабатывает один раз на весь SQL-оператор, независимо от количества затронутых строк.
-
-**Концепция:** Триггер и триггерная функция — раздельные объекты. Одну функцию можно использовать в нескольких триггерах.
-
----
-
-### 6. Тестирование BEFORE INSERT триггера
-
-```sql
-INSERT INTO products (name, price, stock)
-VALUES ('laptop', 1000.00, 10);
-```
-
-**Результат:**
-```
- id |  name  |  price  | stock |      created_at         |      updated_at
-----+--------+---------+-------+-------------------------+-------------------------
-  1 | Laptop | 1000.00 |    10 | 2026-01-15 10:30:00.123 | 2026-01-15 10:30:00.123
-```
-
-**Объяснение:** Имя 'laptop' было преобразовано в 'Laptop' триггерной функцией.
-
-**Тест на ошибку:**
-```sql
-INSERT INTO products (name, price, stock)
-VALUES ('mouse', -50.00, 5);
-```
-
-**Результат:**
-```
-ERROR:  Цена должна быть положительной
-CONTEXT:  PL/pgSQL function validate_product_before_insert() line 3 at RAISE
-```
-
-**Концепция:** BEFORE триггеры могут предотвратить выполнение операции, выбросив исключение.
-
----
-
-### 7-8. Автоматическое обновление метки времени
-
-```sql
-CREATE OR REPLACE FUNCTION update_timestamp()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at := CURRENT_TIMESTAMP;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_update_timestamp
-    BEFORE UPDATE ON products
-    FOR EACH ROW
-    EXECUTE FUNCTION update_timestamp();
-```
-
-**Что делает:** Автоматически обновляет поле `updated_at` при изменении строки.
-
-**Тест:**
-```sql
-UPDATE products SET price = 1100.00 WHERE name = 'Laptop';
-SELECT updated_at FROM products WHERE name = 'Laptop';
-```
-
-**Результат:**
-```
-      updated_at
--------------------------
- 2026-01-15 10:35:42.789
-```
-
-**Концепция:** Распространенный паттерн для отслеживания времени последнего изменения записи.
-
----
-
-### 10-11. Триггерная функция для аудита (AFTER)
-
-```sql
-CREATE OR REPLACE FUNCTION audit_product_changes()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        INSERT INTO products_audit (operation, product_id, new_data, changed_by)
-        VALUES ('I', NEW.id, row_to_json(NEW)::jsonb, current_user);
-        RETURN NEW;
-    ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO products_audit (operation, product_id, old_data, new_data, changed_by)
-        VALUES ('U', NEW.id, row_to_json(OLD)::jsonb, row_to_json(NEW)::jsonb, current_user);
-        RETURN NEW;
-    ELSIF TG_OP = 'DELETE' THEN
-        INSERT INTO products_audit (operation, product_id, old_data, changed_by)
-        VALUES ('D', OLD.id, row_to_json(OLD)::jsonb, current_user);
-        RETURN OLD;
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Что делает:** Записывает все изменения (INSERT, UPDATE, DELETE) в таблицу аудита.
-
-**Специальные переменные триггера:**
-- `TG_OP` — тип операции ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
-- `TG_NAME` — имя триггера
-- `TG_TABLE_NAME` — имя таблицы
-- `TG_TABLE_SCHEMA` — схема таблицы
-- `TG_WHEN` — 'BEFORE' или 'AFTER'
-- `TG_LEVEL` — 'ROW' или 'STATEMENT'
-
-**Функции преобразования:**
-- `row_to_json(record)` — преобразует строку PostgreSQL в JSON
-- `::jsonb` — приводит тип к JSONB для эффективного хранения
-
-**`current_user`** — текущий пользователь PostgreSQL
-
-**Концепция:** AFTER триггеры срабатывают после успешного выполнения операции, идеальны для логирования и каскадных изменений.
-
----
-
-### 12. Тестирование AFTER триггеров
-
-```sql
-INSERT INTO products (name, price, stock)
-VALUES ('Mouse', 25.00, 100);
-
-UPDATE products SET price = 30.00 WHERE name = 'Mouse';
-
-DELETE FROM products WHERE name = 'Mouse';
-
-SELECT * FROM products_audit ORDER BY changed_at;
-```
-
-**Вывод:**
-```
- audit_id | operation | product_id | old_data | new_data | changed_by | changed_at
-----------+-----------+------------+----------+----------+------------+-------------------------
-        1 | I         |          2 |          | {...}    | postgres   | 2026-01-15 10:40:00.123
-        2 | U         |          2 | {...}    | {...}    | postgres   | 2026-01-15 10:40:15.456
-        3 | D         |          2 | {...}    |          | postgres   | 2026-01-15 10:40:30.789
+ schema_name | has_usage | has_create
+-------------+-----------+------------
+ audit       | t         | f
 ```
 
 **Объяснение колонок:**
-- `operation`: 'I' (INSERT), 'U' (UPDATE), 'D' (DELETE)
-- `old_data`, `new_data`: JSONB с полным состоянием строки
+- `has_usage` = t (true) - tno_admin может использовать схему audit
+- `has_create` = f (false) - tno_admin не может создавать новые объекты в схеме (это делает postgres)
 
-**Просмотр JSONB данных:**
+---
+
+### Шаг 2: Создание таблицы аудита с цифровой подписью
+
+#### Последовательность команд
+
 ```sql
+-- Создаем таблицу для хранения логов аудита
+CREATE TABLE audit.data_audit_log (
+    log_id BIGSERIAL PRIMARY KEY,
+    table_schema VARCHAR(100) NOT NULL,
+    table_name VARCHAR(100) NOT NULL,
+    operation VARCHAR(10) NOT NULL,
+    old_data JSONB,
+    new_data JSONB,
+    changed_by VARCHAR(100) NOT NULL,
+    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    client_address INET,
+    application_name VARCHAR(200),
+    transaction_id BIGINT,
+    log_hash VARCHAR(64) NOT NULL,
+    CONSTRAINT check_operation CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE'))
+);
+
+-- Создаем индексы для быстрого поиска
+CREATE INDEX idx_audit_table ON audit.data_audit_log(table_schema, table_name);
+CREATE INDEX idx_audit_user ON audit.data_audit_log(changed_by);
+CREATE INDEX idx_audit_timestamp ON audit.data_audit_log(changed_at);
+CREATE INDEX idx_audit_operation ON audit.data_audit_log(operation);
+
+-- Запрещаем UPDATE и DELETE в таблице аудита (только INSERT)
+CREATE OR REPLACE FUNCTION audit.protect_audit_log()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' OR TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Изменение и удаление логов аудита запрещено!';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_protect_audit_log
+    BEFORE UPDATE OR DELETE ON audit.data_audit_log
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.protect_audit_log();
+
+-- Комментарии для документирования
+COMMENT ON TABLE audit.data_audit_log IS 'Таблица для хранения логов аудита всех изменений данных';
+COMMENT ON COLUMN audit.data_audit_log.log_hash IS 'SHA256 хеш для обнаружения подмены записей';
+```
+
+#### Детальное объяснение каждой команды
+
+1. **`CREATE TABLE audit.data_audit_log (...)`**
+   - Создает таблицу в схеме audit для хранения всех логов
+   - `BIGSERIAL PRIMARY KEY` - автоинкрементный идентификатор (64-битный, до 9 квинтиллионов записей)
+
+2. **Поля таблицы:**
+   - `log_id` - уникальный идентификатор записи лога
+   - `table_schema` - схема таблицы, в которой произошло изменение (VARCHAR(100))
+   - `table_name` - имя таблицы, в которой произошло изменение
+   - `operation` - тип операции: INSERT, UPDATE или DELETE
+   - `old_data` - старое состояние строки в формате JSONB (NULL для INSERT)
+   - `new_data` - новое состояние строки в формате JSONB (NULL для DELETE)
+   - `changed_by` - имя пользователя, выполнившего операцию (current_user)
+   - `changed_at` - метка времени изменения (автоматически устанавливается)
+   - `client_address` - IP-адрес клиента (inet_client_addr())
+   - `application_name` - имя приложения, выполнившего запрос
+   - `transaction_id` - ID транзакции PostgreSQL (txid_current())
+   - `log_hash` - SHA256 хеш записи для обнаружения подмен
+
+3. **`CONSTRAINT check_operation CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE'))`**
+   - Ограничение CHECK, проверяющее, что operation содержит только допустимые значения
+   - Предотвращает вставку некорректных данных на уровне БД
+
+4. **Индексы:**
+   - `idx_audit_table` - ускоряет поиск по схеме и таблице (WHERE table_name = '...')
+   - `idx_audit_user` - ускоряет поиск по пользователю (WHERE changed_by = '...')
+   - `idx_audit_timestamp` - ускоряет поиск и сортировку по времени (ORDER BY changed_at, WHERE changed_at BETWEEN ...)
+   - `idx_audit_operation` - ускоряет фильтрацию по типу операции (WHERE operation = 'UPDATE')
+
+5. **`CREATE OR REPLACE FUNCTION audit.protect_audit_log()`**
+   - Создает защитную функцию, запрещающую изменение и удаление логов
+   - Триггер BEFORE UPDATE OR DELETE вызывает эту функцию
+   - `RAISE EXCEPTION` откатывает транзакцию и выбрасывает ошибку
+   - Обеспечивает неизменяемость (immutability) логов аудита
+
+6. **`COMMENT ON TABLE/COLUMN`**
+   - Добавляет описания к таблице и колонкам
+   - Документация хранится в самой БД и видна в psql (\d+ table_name) и GUI-инструментах
+
+#### Проверка структуры таблицы
+
+```sql
+-- Просмотр структуры таблицы
+\d+ audit.data_audit_log
+
+-- Просмотр индексов
 SELECT
-    audit_id,
+    indexname,
+    indexdef
+FROM pg_indexes
+WHERE schemaname = 'audit' AND tablename = 'data_audit_log';
+```
+
+---
+
+### Шаг 3: Универсальная триггерная функция для аудита
+
+#### Последовательность команд
+
+```sql
+-- Создаем универсальную функцию аудита
+CREATE OR REPLACE FUNCTION audit.universal_audit_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_old_data JSONB;
+    v_new_data JSONB;
+    v_log_data TEXT;
+    v_hash VARCHAR(64);
+BEGIN
+    -- Формируем JSON для старых и новых данных
+    IF TG_OP = 'DELETE' THEN
+        v_old_data := row_to_json(OLD)::JSONB;
+        v_new_data := NULL;
+    ELSIF TG_OP = 'INSERT' THEN
+        v_old_data := NULL;
+        v_new_data := row_to_json(NEW)::JSONB;
+    ELSIF TG_OP = 'UPDATE' THEN
+        v_old_data := row_to_json(OLD)::JSONB;
+        v_new_data := row_to_json(NEW)::JSONB;
+    END IF;
+
+    -- Формируем строку для хеширования
+    v_log_data := TG_TABLE_SCHEMA || '.' || TG_TABLE_NAME || '|' ||
+                  TG_OP || '|' ||
+                  COALESCE(v_old_data::TEXT, 'NULL') || '|' ||
+                  COALESCE(v_new_data::TEXT, 'NULL') || '|' ||
+                  current_user || '|' ||
+                  CURRENT_TIMESTAMP::TEXT || '|' ||
+                  txid_current()::TEXT;
+
+    -- Вычисляем SHA256 хеш для цифровой подписи
+    v_hash := encode(digest(v_log_data, 'sha256'), 'hex');
+
+    -- Вставляем запись в таблицу аудита
+    INSERT INTO audit.data_audit_log (
+        table_schema,
+        table_name,
+        operation,
+        old_data,
+        new_data,
+        changed_by,
+        changed_at,
+        client_address,
+        application_name,
+        transaction_id,
+        log_hash
+    ) VALUES (
+        TG_TABLE_SCHEMA,
+        TG_TABLE_NAME,
+        TG_OP,
+        v_old_data,
+        v_new_data,
+        current_user,
+        CURRENT_TIMESTAMP,
+        inet_client_addr(),
+        current_setting('application_name', true),
+        txid_current(),
+        v_hash
+    );
+
+    -- Возвращаем правильное значение в зависимости от операции
+    IF TG_OP = 'DELETE' THEN
+        RETURN OLD;
+    ELSE
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Комментарий к функции
+COMMENT ON FUNCTION audit.universal_audit_trigger() IS 'Универсальная функция аудита для логирования INSERT/UPDATE/DELETE операций';
+```
+
+#### Детальное объяснение каждой команды
+
+1. **`DECLARE` секция:**
+   - `v_old_data JSONB` - переменная для хранения старого состояния строки
+   - `v_new_data JSONB` - переменная для нового состояния
+   - `v_log_data TEXT` - строка для формирования хеша
+   - `v_hash VARCHAR(64)` - SHA256 хеш (64 шестнадцатеричных символа = 256 бит)
+
+2. **Блок формирования JSON:**
+   - `row_to_json(OLD)` - преобразует запись PostgreSQL в JSON объект
+   - `::JSONB` - приведение типа к JSONB (бинарный JSON, поддерживает индексацию)
+   - Для DELETE: old_data заполнен, new_data = NULL
+   - Для INSERT: old_data = NULL, new_data заполнен
+   - Для UPDATE: оба заполнены (можно сравнить что изменилось)
+
+3. **Формирование строки для хеширования:**
+   ```
+   schema.table|OPERATION|old_json|new_json|user|timestamp|txid
+   ```
+   - `||` - оператор конкатенации строк в PostgreSQL
+   - `COALESCE(value, 'NULL')` - заменяет NULL на строку 'NULL'
+   - Включает все ключевые данные для гарантии целостности
+
+4. **`encode(digest(v_log_data, 'sha256'), 'hex')`**
+   - `digest(data, 'sha256')` - вычисляет SHA256 хеш (возвращает bytea)
+   - `encode(bytea, 'hex')` - конвертирует байты в шестнадцатеричную строку
+   - SHA256 - криптографическая хеш-функция (256 бит, практически невозможно подделать)
+
+5. **Специальные переменные триггера:**
+   - `TG_TABLE_SCHEMA` - схема таблицы, на которой сработал триггер
+   - `TG_TABLE_NAME` - имя таблицы
+   - `TG_OP` - тип операции ('INSERT', 'UPDATE', 'DELETE')
+
+6. **Системные функции PostgreSQL:**
+   - `current_user` - имя текущего пользователя PostgreSQL
+   - `CURRENT_TIMESTAMP` - текущая метка времени
+   - `inet_client_addr()` - IP-адрес клиента (NULL для локальных подключений)
+   - `current_setting('application_name', true)` - имя приложения (из настроек подключения)
+   - `txid_current()` - ID текущей транзакции (уникальный 64-битный номер)
+
+7. **`SECURITY DEFINER`**
+   - Функция выполняется с правами владельца (postgres), а не вызывающего пользователя
+   - Необходимо, чтобы обычные пользователи могли писать в audit.data_audit_log
+   - Без этого пользователю нужны были бы права INSERT на таблицу аудита
+
+8. **Возвращаемое значение:**
+   - Для DELETE: `RETURN OLD` (так как NEW не определен)
+   - Для INSERT/UPDATE: `RETURN NEW`
+   - AFTER триггеры игнорируют возвращаемое значение, но его нужно вернуть
+
+#### Концептуальное объяснение
+
+**Цифровая подпись (log_hash):**
+Хеш SHA256 служит цифровой подписью записи. Если кто-то попытается изменить данные в таблице аудита напрямую (в обход защитного триггера, например через pg_dump/restore), хеш не совпадет с данными. Можно написать функцию проверки целостности:
+
+```sql
+-- Функция для проверки целостности логов
+CREATE OR REPLACE FUNCTION audit.verify_log_integrity(p_log_id BIGINT)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_record RECORD;
+    v_computed_hash VARCHAR(64);
+    v_log_data TEXT;
+BEGIN
+    SELECT * INTO v_record FROM audit.data_audit_log WHERE log_id = p_log_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Запись с log_id = % не найдена', p_log_id;
+    END IF;
+
+    v_log_data := v_record.table_schema || '.' || v_record.table_name || '|' ||
+                  v_record.operation || '|' ||
+                  COALESCE(v_record.old_data::TEXT, 'NULL') || '|' ||
+                  COALESCE(v_record.new_data::TEXT, 'NULL') || '|' ||
+                  v_record.changed_by || '|' ||
+                  v_record.changed_at::TEXT || '|' ||
+                  v_record.transaction_id::TEXT;
+
+    v_computed_hash := encode(digest(v_log_data, 'sha256'), 'hex');
+
+    RETURN v_computed_hash = v_record.log_hash;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+---
+
+### Шаг 4: Применение триггеров к таблицам курсовой работы
+
+#### Последовательность команд
+
+```sql
+-- Создаем триггеры аудита на таблицу policies
+CREATE TRIGGER trg_audit_policies_insert
+    AFTER INSERT ON insurance_system.policies
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.universal_audit_trigger();
+
+CREATE TRIGGER trg_audit_policies_update
+    AFTER UPDATE ON insurance_system.policies
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.universal_audit_trigger();
+
+CREATE TRIGGER trg_audit_policies_delete
+    AFTER DELETE ON insurance_system.policies
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.universal_audit_trigger();
+
+-- Создаем триггеры аудита на таблицу payments
+CREATE TRIGGER trg_audit_payments_insert
+    AFTER INSERT ON insurance_system.payments
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.universal_audit_trigger();
+
+CREATE TRIGGER trg_audit_payments_update
+    AFTER UPDATE ON insurance_system.payments
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.universal_audit_trigger();
+
+CREATE TRIGGER trg_audit_payments_delete
+    AFTER DELETE ON insurance_system.payments
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.universal_audit_trigger();
+
+-- Создаем триггеры на остальные таблицы курсовой работы
+-- (claims, clients, agents - аналогично)
+```
+
+#### Детальное объяснение
+
+1. **`AFTER INSERT/UPDATE/DELETE`**
+   - Триггеры срабатывают ПОСЛЕ успешного выполнения операции
+   - Если операция отменится (ROLLBACK), лог не будет записан
+   - AFTER триггеры не могут изменить данные (в отличие от BEFORE)
+
+2. **`FOR EACH ROW`**
+   - Триггер срабатывает для каждой затронутой строки
+   - Если UPDATE изменит 100 строк, триггер выполнится 100 раз
+   - Альтернатива: FOR EACH STATEMENT (один раз на весь оператор)
+
+3. **`EXECUTE FUNCTION audit.universal_audit_trigger()`**
+   - Вызывает универсальную функцию аудита
+   - Одна функция используется для всех таблиц и всех операций
+   - Функция определяет тип операции через TG_OP
+
+#### Тестирование аудита
+
+```sql
+-- Выполняем различные операции над данными
+
+-- INSERT
+INSERT INTO insurance_system.policies
+  (policy_number, client_id, agent_id, policy_type, start_date, end_date, premium, status)
+VALUES
+  ('POL-TEST-001', 1, 1, 'auto', '2024-01-16', '2025-01-16', 25000.00, 'active');
+
+-- UPDATE
+UPDATE insurance_system.policies
+SET premium = 27000.00
+WHERE policy_number = 'POL-TEST-001';
+
+-- DELETE
+DELETE FROM insurance_system.policies
+WHERE policy_number = 'POL-TEST-001';
+
+-- Просмотр логов аудита
+SELECT
+    log_id,
+    table_name,
     operation,
-    new_data->>'name' AS product_name,
-    new_data->>'price' AS new_price,
-    old_data->>'price' AS old_price
-FROM products_audit
-WHERE operation = 'U';
+    changed_by,
+    changed_at,
+    new_data->>'policy_number' AS policy_number,
+    new_data->>'premium' AS new_premium,
+    old_data->>'premium' AS old_premium,
+    log_hash
+FROM audit.data_audit_log
+WHERE table_name = 'policies'
+ORDER BY log_id DESC
+LIMIT 10;
+
+-- Проверка целостности лога
+SELECT audit.verify_log_integrity(1);
 ```
 
-**Концепция:** JSONB позволяет гибко хранить исторические данные без изменения схемы таблицы аудита при добавлении новых полей.
+#### Объяснение результатов
 
----
-
-### 14-15. Каскадное обновление складских остатков
-
-```sql
-CREATE OR REPLACE FUNCTION update_stock_on_order()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF (SELECT stock FROM products WHERE id = NEW.product_id) < NEW.quantity THEN
-        RAISE EXCEPTION 'Недостаточно товара на складе';
-    END IF;
-
-    UPDATE products
-    SET stock = stock - NEW.quantity
-    WHERE id = NEW.product_id;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_update_stock_on_order
-    AFTER INSERT ON orders
-    FOR EACH ROW
-    EXECUTE FUNCTION update_stock_on_order();
+**Результат SELECT из audit.data_audit_log:**
 ```
-
-**Что делает:** Автоматически уменьшает количество товара на складе при создании заказа.
-
-**Тест:**
-```sql
--- До заказа
-SELECT stock FROM products WHERE id = 1;  -- stock = 10
-
-INSERT INTO orders (product_id, quantity) VALUES (1, 2);
-
--- После заказа
-SELECT stock FROM products WHERE id = 1;  -- stock = 8
-```
-
-**Попытка заказать больше, чем есть на складе:**
-```sql
-INSERT INTO orders (product_id, quantity) VALUES (1, 100);
--- ERROR:  Недостаточно товара на складе
-```
-
-**Концепция:** Триггеры могут реализовывать сложную бизнес-логику и каскадные изменения в нескольких таблицах, обеспечивая целостность данных.
-
----
-
-### 18-19. INSTEAD OF триггер для представлений
-
-```sql
-CREATE VIEW product_summary AS
-SELECT id, name, price, stock
-FROM products;
-
-CREATE OR REPLACE FUNCTION update_product_via_view()
-RETURNS TRIGGER AS $$
-BEGIN
-    UPDATE products
-    SET name = NEW.name,
-        price = NEW.price,
-        stock = NEW.stock
-    WHERE id = NEW.id;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_update_product_view
-    INSTEAD OF UPDATE ON product_summary
-    FOR EACH ROW
-    EXECUTE FUNCTION update_product_via_view();
-```
-
-**Что делает:** Позволяет обновлять данные через представление.
-
-**Объяснение:**
-- По умолчанию представления только для чтения
-- INSTEAD OF триггер выполняется ВМЕСТО операции над представлением
-- Триггер выполняет реальную операцию над базовой таблицей
-
-**Тест:**
-```sql
-UPDATE product_summary SET price = 1200.00 WHERE name = 'Laptop';
--- Обновляется базовая таблица products
-```
-
-**Применение INSTEAD OF:**
-- Простые представления: PostgreSQL автоматически делает их обновляемыми
-- Сложные представления (JOIN, GROUP BY, DISTINCT): требуют INSTEAD OF триггеров
-- Создание упрощенных интерфейсов для сложных схем данных
-
-**Концепция:** INSTEAD OF триггеры применяются только к представлениям и всегда на уровне строк (FOR EACH ROW).
-
----
-
-### 21. Условный триггер (WHEN)
-
-```sql
-CREATE OR REPLACE FUNCTION log_price_increase()
-RETURNS TRIGGER AS $$
-BEGIN
-    RAISE NOTICE 'Цена товара % увеличена с % на %',
-        NEW.name, OLD.price, NEW.price;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_log_price_increase
-    BEFORE UPDATE ON products
-    FOR EACH ROW
-    WHEN (NEW.price > OLD.price)
-    EXECUTE FUNCTION log_price_increase();
-```
-
-**Что делает:** Триггер срабатывает только когда цена увеличивается.
-
-**Объяснение WHEN:**
-- `WHEN (condition)` — условие, которое должно быть истинным для срабатывания триггера
-- Условие проверяется перед вызовом функции
-- Для BEFORE триггеров: проверяется перед вызовом функции
-- Для AFTER триггеров: событие запоминается только если условие истинно (оптимизация)
-
-**Тест:**
-```sql
-UPDATE products SET price = 1300.00 WHERE name = 'Laptop';
--- NOTICE:  Цена товара Laptop увеличена с 1200.00 на 1300.00
-
-UPDATE products SET price = 1200.00 WHERE name = 'Laptop';
--- Триггер не срабатывает (цена уменьшилась)
-```
-
-**Концепция:** WHEN позволяет оптимизировать триггеры, избегая ненужных вызовов функций.
-
----
-
-### 23. Операторный триггер (STATEMENT-level)
-
-```sql
-CREATE OR REPLACE FUNCTION log_table_modification()
-RETURNS TRIGGER AS $$
-BEGIN
-    RAISE NOTICE 'Выполнена операция % на таблице products', TG_OP;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER trg_log_table_modification
-    AFTER INSERT OR UPDATE OR DELETE ON products
-    FOR EACH STATEMENT
-    EXECUTE FUNCTION log_table_modification();
-```
-
-**Что делает:** Триггер срабатывает один раз на весь SQL-оператор.
-
-**Отличие FOR EACH STATEMENT от FOR EACH ROW:**
-
-**FOR EACH ROW:**
-- Срабатывает для каждой затронутой строки
-- Доступны NEW и OLD
-- Может изменить данные (в BEFORE)
-- Пример: UPDATE products SET price = price * 1.1 (3 строки) → триггер сработает 3 раза
-
-**FOR EACH STATEMENT:**
-- Срабатывает один раз на оператор
-- NEW и OLD недоступны
-- Не может изменить данные
-- Тот же UPDATE → триггер сработает 1 раз
-
-**Тест:**
-```sql
-INSERT INTO products (name, price, stock)
-VALUES ('Keyboard', 75.00, 50), ('Monitor', 300.00, 20);
--- NOTICE:  Выполнена операция INSERT на таблице products
--- (только одно сообщение, хотя вставлено 2 строки)
-```
-
-**Применение STATEMENT-level триггеров:**
-- Логирование на уровне операций
-- Проверка прав доступа
-- Мониторинг активности
-- Предотвращение операций (в BEFORE)
-
-**Концепция:** Операторные триггеры эффективнее для операций, затрагивающих много строк, так как срабатывают один раз.
-
----
-
-### 25. Просмотр триггеров
-
-```sql
-SELECT
-    trigger_name,
-    event_manipulation,
-    event_object_table,
-    action_timing,
-    action_orientation
-FROM information_schema.triggers
-WHERE event_object_table = 'products'
-ORDER BY trigger_name;
-```
-
-**Вывод (пример):**
-```
-           trigger_name           | event_manipulation | event_object_table | action_timing | action_orientation
-----------------------------------+--------------------+--------------------+---------------+--------------------
- trg_audit_product_delete         | DELETE             | products           | AFTER         | ROW
- trg_audit_product_insert         | INSERT             | products           | AFTER         | ROW
- trg_audit_product_update         | UPDATE             | products           | AFTER         | ROW
- trg_log_table_modification       | INSERT             | products           | AFTER         | STATEMENT
- trg_update_timestamp             | UPDATE             | products           | BEFORE        | ROW
- trg_validate_product_before_insert | INSERT           | products           | BEFORE        | ROW
+ log_id | table_name | operation |  changed_by  |     changed_at      | policy_number | new_premium | old_premium |        log_hash
+--------+------------+-----------+--------------+---------------------+---------------+-------------+-------------+------------------
+      3 | policies   | DELETE    | postgres     | 2024-01-16 15:30:45 |               |             | 27000.00    | a3f5d8c2e1b...
+      2 | policies   | UPDATE    | postgres     | 2024-01-16 15:30:30 | POL-TEST-001  | 27000.00    | 25000.00    | 7b2e4f9a8c1...
+      1 | policies   | INSERT    | postgres     | 2024-01-16 15:30:15 | POL-TEST-001  | 25000.00    |             | 9d1c6e3b5a7...
 ```
 
 **Объяснение колонок:**
-- `trigger_name` — имя триггера
-- `event_manipulation` — событие (INSERT, UPDATE, DELETE)
-- `event_object_table` — таблица
-- `action_timing` — момент срабатывания (BEFORE, AFTER, INSTEAD OF)
-- `action_orientation` — уровень (ROW, STATEMENT)
+- `log_id` - уникальный ID записи лога
+- `operation` - тип операции (INSERT/UPDATE/DELETE)
+- `changed_by` - пользователь PostgreSQL, выполнивший операцию
+- `changed_at` - точное время операции
+- `policy_number`, `new_premium`, `old_premium` - извлечены из JSONB через оператор ->>'
+- `log_hash` - SHA256 хеш для проверки целостности
 
-**Альтернативный запрос (более подробный):**
-```sql
-SELECT * FROM pg_trigger WHERE tgrelid = 'products'::regclass;
+**Проверка целостности:**
 ```
-
-**Концепция:** information_schema — стандартизированный способ получения метаданных, pg_catalog — специфичный для PostgreSQL.
+ verify_log_integrity
+----------------------
+ t
+```
+Возвращает `t` (true), если хеш соответствует данным.
 
 ---
 
-### 27-28. Управление триггерами
+## Задание 2: Событийные триггеры для операций DDL
 
-```sql
--- Отключение триггера
-ALTER TABLE products DISABLE TRIGGER trg_validate_product_before_insert;
-
--- Включение триггера
-ALTER TABLE products ENABLE TRIGGER trg_validate_product_before_insert;
-
--- Отключение всех триггеров на таблице
-ALTER TABLE products DISABLE TRIGGER ALL;
-
--- Включение всех триггеров
-ALTER TABLE products ENABLE TRIGGER ALL;
-
--- Отключение только пользовательских триггеров (не системных)
-ALTER TABLE products DISABLE TRIGGER USER;
-```
-
-**Применение:**
-- Временное отключение для массовой загрузки данных
-- Отладка
-- Обслуживание
-
-**ВАЖНО:** Отключение триггеров может нарушить целостность данных. Используйте с осторожностью.
+**Что требуется:**
+Создать событийный триггер на создание, изменение, удаление таблиц. Таблица с логами должна находиться в отдельной схеме. Доступ к таблицам логов должен быть только у администратора.
 
 ---
 
-### 29-30. Удаление триггеров и функций
+### Шаг 1: Создание таблицы для логирования DDL-операций
+
+#### Последовательность команд
 
 ```sql
-DROP TRIGGER IF EXISTS trg_log_price_increase ON products;
-DROP FUNCTION IF EXISTS log_price_increase();
+-- Создаем таблицу для хранения логов DDL-операций
+CREATE TABLE audit.ddl_audit_log (
+    log_id BIGSERIAL PRIMARY KEY,
+    event_type VARCHAR(50) NOT NULL,
+    object_type VARCHAR(50),
+    schema_name VARCHAR(100),
+    object_name VARCHAR(200),
+    ddl_command TEXT,
+    executed_by VARCHAR(100) NOT NULL,
+    executed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    client_address INET,
+    application_name VARCHAR(200),
+    transaction_id BIGINT,
+    is_temp_object BOOLEAN DEFAULT FALSE,
+    log_hash VARCHAR(64) NOT NULL
+);
+
+-- Индексы для быстрого поиска
+CREATE INDEX idx_ddl_event_type ON audit.ddl_audit_log(event_type);
+CREATE INDEX idx_ddl_object_name ON audit.ddl_audit_log(object_name);
+CREATE INDEX idx_ddl_timestamp ON audit.ddl_audit_log(executed_at);
+CREATE INDEX idx_ddl_user ON audit.ddl_audit_log(executed_by);
+
+-- Защита от изменений (аналогично data_audit_log)
+CREATE TRIGGER trg_protect_ddl_audit_log
+    BEFORE UPDATE OR DELETE ON audit.ddl_audit_log
+    FOR EACH ROW
+    EXECUTE FUNCTION audit.protect_audit_log();
+
+COMMENT ON TABLE audit.ddl_audit_log IS 'Таблица для хранения логов всех DDL-операций (CREATE/ALTER/DROP)';
 ```
 
-**Что делает:** Удаляет триггер и его функцию.
+#### Детальное объяснение каждой команды
 
-**Порядок удаления:**
-1. Сначала удалить триггер
-2. Затем удалить функцию (если она не используется другими триггерами)
+1. **Поля таблицы:**
+   - `log_id` - уникальный ID записи
+   - `event_type` - тип события: 'ddl_command_start', 'ddl_command_end', 'sql_drop'
+   - `object_type` - тип объекта: 'table', 'index', 'function', 'view' и т.д.
+   - `schema_name` - схема, в которой находится объект
+   - `object_name` - имя объекта (таблица, индекс и т.д.)
+   - `ddl_command` - полный текст DDL-команды
+   - `executed_by` - пользователь, выполнивший команду
+   - `executed_at` - время выполнения
+   - `client_address` - IP-адрес клиента
+   - `application_name` - имя приложения
+   - `transaction_id` - ID транзакции
+   - `is_temp_object` - флаг временного объекта (TEMPORARY TABLE)
+   - `log_hash` - SHA256 хеш для проверки целостности
 
-**IF EXISTS** — предотвращает ошибку, если объект не существует.
+2. **Индексы:**
+   - Оптимизируют поиск по типу события, имени объекта, времени и пользователю
 
-**Альтернатива (удаление функции со всеми зависимостями):**
+3. **Защитный триггер:**
+   - Использует ту же функцию `audit.protect_audit_log()`
+   - Запрещает изменение и удаление логов DDL
+
+---
+
+### Шаг 2: Создание функций событийных триггеров
+
+#### Последовательность команд
+
 ```sql
-DROP FUNCTION log_price_increase() CASCADE;
--- Автоматически удалит все триггеры, использующие эту функцию
+-- Функция для события ddl_command_end (после выполнения DDL)
+CREATE OR REPLACE FUNCTION audit.log_ddl_command()
+RETURNS event_trigger AS $$
+DECLARE
+    v_obj RECORD;
+    v_log_data TEXT;
+    v_hash VARCHAR(64);
+    v_is_temp BOOLEAN;
+BEGIN
+    -- Получаем информацию о созданных/измененных объектах
+    FOR v_obj IN SELECT * FROM pg_event_trigger_ddl_commands()
+    LOOP
+        -- Проверяем, является ли объект временным
+        v_is_temp := (v_obj.object_identity LIKE '%pg_temp%');
+
+        -- Формируем строку для хеширования
+        v_log_data := TG_EVENT || '|' ||
+                      v_obj.object_type || '|' ||
+                      COALESCE(v_obj.schema_name, 'public') || '|' ||
+                      v_obj.object_identity || '|' ||
+                      current_query() || '|' ||
+                      current_user || '|' ||
+                      CURRENT_TIMESTAMP::TEXT || '|' ||
+                      txid_current()::TEXT;
+
+        v_hash := encode(digest(v_log_data, 'sha256'), 'hex');
+
+        -- Записываем в таблицу аудита
+        INSERT INTO audit.ddl_audit_log (
+            event_type,
+            object_type,
+            schema_name,
+            object_name,
+            ddl_command,
+            executed_by,
+            executed_at,
+            client_address,
+            application_name,
+            transaction_id,
+            is_temp_object,
+            log_hash
+        ) VALUES (
+            TG_EVENT,
+            v_obj.object_type,
+            v_obj.schema_name,
+            v_obj.object_identity,
+            current_query(),
+            current_user,
+            CURRENT_TIMESTAMP,
+            inet_client_addr(),
+            current_setting('application_name', true),
+            txid_current(),
+            v_is_temp,
+            v_hash
+        );
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Функция для события sql_drop (перед удалением объектов)
+CREATE OR REPLACE FUNCTION audit.log_ddl_drop()
+RETURNS event_trigger AS $$
+DECLARE
+    v_obj RECORD;
+    v_log_data TEXT;
+    v_hash VARCHAR(64);
+    v_is_temp BOOLEAN;
+BEGIN
+    -- Получаем информацию об удаляемых объектах
+    FOR v_obj IN SELECT * FROM pg_event_trigger_dropped_objects()
+    LOOP
+        v_is_temp := (v_obj.object_identity LIKE '%pg_temp%');
+
+        v_log_data := TG_EVENT || '|' ||
+                      v_obj.object_type || '|' ||
+                      COALESCE(v_obj.schema_name, 'public') || '|' ||
+                      v_obj.object_identity || '|' ||
+                      current_query() || '|' ||
+                      current_user || '|' ||
+                      CURRENT_TIMESTAMP::TEXT || '|' ||
+                      txid_current()::TEXT;
+
+        v_hash := encode(digest(v_log_data, 'sha256'), 'hex');
+
+        INSERT INTO audit.ddl_audit_log (
+            event_type,
+            object_type,
+            schema_name,
+            object_name,
+            ddl_command,
+            executed_by,
+            executed_at,
+            client_address,
+            application_name,
+            transaction_id,
+            is_temp_object,
+            log_hash
+        ) VALUES (
+            TG_EVENT,
+            v_obj.object_type,
+            v_obj.schema_name,
+            v_obj.object_identity,
+            current_query(),
+            current_user,
+            CURRENT_TIMESTAMP,
+            inet_client_addr(),
+            current_setting('application_name', true),
+            txid_current(),
+            v_is_temp,
+            v_hash
+        );
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+COMMENT ON FUNCTION audit.log_ddl_command() IS 'Функция событийного триггера для логирования CREATE/ALTER команд';
+COMMENT ON FUNCTION audit.log_ddl_drop() IS 'Функция событийного триггера для логирования DROP команд';
+```
+
+#### Детальное объяснение каждой команды
+
+1. **`RETURNS event_trigger`**
+   - Специальный тип возвращаемого значения для событийных триггеров
+   - Отличается от обычных триггеров (которые возвращают TRIGGER)
+
+2. **`pg_event_trigger_ddl_commands()`**
+   - Функция PostgreSQL, возвращающая информацию о выполненных DDL-командах
+   - Доступна только в контексте события `ddl_command_end`
+   - Возвращает записи с полями:
+     - `classid` - OID системного каталога
+     - `objid` - OID объекта
+     - `objsubid` - ID подобъекта (0 для таблиц)
+     - `command_tag` - тег команды (CREATE TABLE, ALTER TABLE и т.д.)
+     - `object_type` - тип объекта ('table', 'index', 'function' и т.д.)
+     - `schema_name` - схема объекта
+     - `object_identity` - полное имя объекта (schema.table)
+     - `in_extension` - является ли объект частью расширения
+
+3. **`pg_event_trigger_dropped_objects()`**
+   - Функция для получения информации об удаляемых объектах
+   - Доступна только в контексте события `sql_drop`
+   - Возвращает аналогичные поля
+
+4. **`current_query()`**
+   - Возвращает полный текст текущего SQL-запроса
+   - Полезно для аудита - видим точную команду, которая была выполнена
+   - Для событийных триггеров это будет DDL-команда (CREATE TABLE, DROP INDEX и т.д.)
+
+5. **`TG_EVENT`**
+   - Специальная переменная для событийных триггеров
+   - Содержит имя события: 'ddl_command_end', 'sql_drop' и т.д.
+
+6. **Проверка временных объектов:**
+   - `v_obj.object_identity LIKE '%pg_temp%'` - проверяет, находится ли объект во временной схеме
+   - Временные таблицы создаются в схемах вида `pg_temp_N`
+   - Флаг `is_temp_object` позволяет фильтровать временные объекты при анализе
+
+---
+
+### Шаг 3: Создание событийных триггеров
+
+#### Последовательность команд
+
+```sql
+-- Событийный триггер для CREATE и ALTER
+CREATE EVENT TRIGGER evt_audit_ddl_command
+    ON ddl_command_end
+    EXECUTE FUNCTION audit.log_ddl_command();
+
+-- Событийный триггер для DROP
+CREATE EVENT TRIGGER evt_audit_ddl_drop
+    ON sql_drop
+    EXECUTE FUNCTION audit.log_ddl_drop();
+
+-- Комментарии
+COMMENT ON EVENT TRIGGER evt_audit_ddl_command IS 'Событийный триггер для аудита CREATE/ALTER операций';
+COMMENT ON EVENT TRIGGER evt_audit_ddl_drop IS 'Событийный триггер для аудита DROP операций';
+```
+
+#### Детальное объяснение
+
+1. **`CREATE EVENT TRIGGER evt_audit_ddl_command`**
+   - Создает событийный триггер (глобальный для всей базы данных)
+   - Имя триггера: `evt_audit_ddl_command` (префикс evt_ - соглашение)
+
+2. **`ON ddl_command_end`**
+   - Триггер срабатывает ПОСЛЕ выполнения DDL-команды
+   - Другие события: `ddl_command_start` (до выполнения), `table_rewrite` (при перезаписи таблицы)
+   - На `ddl_command_end` объект уже создан/изменен в системных каталогах
+
+3. **`ON sql_drop`**
+   - Триггер срабатывает ПЕРЕД удалением объекта
+   - Выполняется до того, как объект исчезнет из системных каталогов
+   - Позволяет зафиксировать информацию об удаляемом объекте
+
+#### Просмотр событийных триггеров
+
+```sql
+-- Просмотр событийных триггеров
+SELECT
+    evtname AS trigger_name,
+    evtevent AS event_name,
+    evtenabled AS enabled
+FROM pg_event_trigger
+ORDER BY evtname;
+
+-- Или через psql
+\dET
+```
+
+**Результат:**
+```
+     trigger_name      |   event_name    | enabled
+-----------------------+-----------------+---------
+ evt_audit_ddl_command | ddl_command_end | O
+ evt_audit_ddl_drop    | sql_drop        | O
+```
+
+**Объяснение колонки enabled:**
+- `O` - Origin (включен всегда)
+- `R` - Replica (включен на реплике)
+- `A` - Always (включен всегда)
+- `D` - Disabled (отключен)
+
+---
+
+### Шаг 4: Тестирование событийных триггеров
+
+#### Последовательность команд
+
+```sql
+-- Подключаемся как администратор tno_admin
+\c - tno_admin
+
+-- Создаем тестовую таблицу
+CREATE TABLE public.test_ddl_audit (
+    id SERIAL PRIMARY KEY,
+    test_data VARCHAR(100)
+);
+
+-- Изменяем структуру таблицы
+ALTER TABLE public.test_ddl_audit ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+-- Создаем индекс
+CREATE INDEX idx_test_data ON public.test_ddl_audit(test_data);
+
+-- Создаем временную таблицу (для проверки фильтрации)
+CREATE TEMPORARY TABLE temp_test (
+    id INT
+);
+
+-- Удаляем объекты
+DROP INDEX public.idx_test_data;
+DROP TABLE public.test_ddl_audit;
+DROP TABLE temp_test;
+
+-- Просматриваем логи DDL-операций
+SELECT
+    log_id,
+    event_type,
+    object_type,
+    object_name,
+    executed_by,
+    executed_at,
+    is_temp_object,
+    substring(ddl_command, 1, 50) AS ddl_preview
+FROM audit.ddl_audit_log
+ORDER BY log_id DESC;
+
+-- Фильтруем только постоянные таблицы (не временные)
+SELECT
+    object_type,
+    object_name,
+    executed_by,
+    executed_at
+FROM audit.ddl_audit_log
+WHERE object_type = 'table' AND is_temp_object = FALSE
+ORDER BY executed_at DESC;
+
+-- Подсчет операций по типам
+SELECT
+    event_type,
+    object_type,
+    COUNT(*) AS operation_count
+FROM audit.ddl_audit_log
+GROUP BY event_type, object_type
+ORDER BY operation_count DESC;
+```
+
+#### Объяснение результатов
+
+**Результат SELECT из audit.ddl_audit_log:**
+```
+ log_id |   event_type    | object_type |        object_name        | executed_by |     executed_at     | is_temp_object |                ddl_preview
+--------+-----------------+-------------+---------------------------+-------------+---------------------+----------------+-------------------------------------------
+      6 | sql_drop        | table       | temp_test                 | tno_admin   | 2024-01-16 16:15:45 | t              | DROP TABLE temp_test;
+      5 | sql_drop        | table       | public.test_ddl_audit     | tno_admin   | 2024-01-16 16:15:40 | f              | DROP TABLE public.test_ddl_audit;
+      4 | sql_drop        | index       | public.idx_test_data      | tno_admin   | 2024-01-16 16:15:35 | f              | DROP INDEX public.idx_test_data;
+      3 | ddl_command_end | index       | public.idx_test_data      | tno_admin   | 2024-01-16 16:15:20 | f              | CREATE INDEX idx_test_data ON public.te...
+      2 | ddl_command_end | table       | public.test_ddl_audit     | tno_admin   | 2024-01-16 16:15:10 | f              | ALTER TABLE public.test_ddl_audit ADD CO...
+      1 | ddl_command_end | table       | public.test_ddl_audit     | tno_admin   | 2024-01-16 16:15:00 | f              | CREATE TABLE public.test_ddl_audit (    ...
+```
+
+**Объяснение колонок:**
+- `event_type` - тип события (ddl_command_end для CREATE/ALTER, sql_drop для DROP)
+- `object_type` - тип объекта (table, index, function и т.д.)
+- `object_name` - полное имя объекта (включая схему)
+- `is_temp_object` - TRUE для временных объектов (temp_test)
+- `ddl_preview` - первые 50 символов DDL-команды
+
+**Ответ на вопрос задания:** Да, временные таблицы попадают в аудит, но помечены флагом `is_temp_object = TRUE`, что позволяет их фильтровать при анализе.
+
+---
+
+## Инструкция по выполнению на Windows 10
+
+### Запуск psql и подключение
+
+**Способ 1: Через cmd**
+```cmd
+# Подключение как postgres (суперпользователь)
+psql -U postgres -d your_database
+
+# Подключение как tno_admin
+psql -U tno_admin -d your_database
+```
+
+**Способ 2: Через PowerShell**
+```powershell
+# Аналогично cmd
+psql -U postgres -d your_database
+psql -U tno_admin -d your_database
+```
+
+**Способ 3: Использовать pgAdmin 4**
+- Query Tool предоставляет удобный GUI для выполнения команд
+- Можно переключаться между пользователями в свойствах подключения
+
+### Проверка прав доступа
+
+```sql
+-- Подключаемся как tno_admin
+\c - tno_admin
+
+-- Проверяем доступ к схеме audit (должно работать)
+SELECT COUNT(*) FROM audit.data_audit_log;
+
+-- Проверяем доступ к основным таблицам (должно работать, если есть права)
+SELECT COUNT(*) FROM insurance_system.policies;
+
+-- Подключаемся как другой пользователь (если есть)
+\c - some_other_user
+
+-- Пытаемся получить доступ к audit (должна быть ошибка)
+SELECT COUNT(*) FROM audit.data_audit_log;
+-- ERROR:  permission denied for schema audit
+```
+
+### Установка расширения pgcrypto
+
+Если pgcrypto не установлен:
+```sql
+-- От имени postgres
+CREATE EXTENSION pgcrypto;
+
+-- Проверка установленных расширений
+\dx
 ```
 
 ---
 
-## Технический концепт: Триггеры в PostgreSQL
+## Концептуальное объяснение системы аудита
 
-### Архитектура триггеров
+### Архитектура системы аудита
 
-**Триггер состоит из двух компонентов:**
+**Компоненты:**
+1. **Схема audit** - изолированный namespace для всех объектов аудита
+2. **Таблицы логов** - data_audit_log (DML), ddl_audit_log (DDL)
+3. **Универсальные функции** - переиспользуемые триггерные функции
+4. **Триггеры** - привязка функций к таблицам и событиям
+5. **Защитные механизмы** - запрет изменения логов, проверка целостности
 
-1. **Определение триггера** (CREATE TRIGGER):
-   - Указывает событие (INSERT, UPDATE, DELETE, TRUNCATE)
-   - Указывает момент (BEFORE, AFTER, INSTEAD OF)
-   - Указывает уровень (ROW, STATEMENT)
-   - Связывает с таблицей
+### Почему JSONB для хранения данных?
 
-2. **Триггерная функция** (CREATE FUNCTION):
-   - Содержит логику
-   - Может быть переиспользована
-   - Должна возвращать TRIGGER
-   - Имеет доступ к специальным переменным
+**Преимущества JSONB:**
+- Гибкость: схема логов не меняется при добавлении колонок в таблицу
+- Запросы: поддерживает индексы (GIN) и операторы ->>, ->, @>, ? и др.
+- Сжатие: PostgreSQL автоматически сжимает JSONB (TOAST)
+- Стандарт: JSON - универсальный формат обмена данными
 
-### Порядок выполнения триггеров
-
-При выполнении UPDATE products SET price = 100 WHERE id = 1:
-
-1. **BEFORE STATEMENT** триггеры
-2. Для каждой строки:
-   - **BEFORE ROW** триггеры (в алфавитном порядке имен)
-   - Выполнение операции
-   - **AFTER ROW** триггеры (в алфавитном порядке имен)
-3. **AFTER STATEMENT** триггеры
-
-**ВАЖНО:** Порядок выполнения триггеров одного типа — алфавитный по имени. Используйте префиксы для контроля порядка:
+**Пример запросов к JSONB:**
 ```sql
-CREATE TRIGGER a_first_trigger ...
-CREATE TRIGGER b_second_trigger ...
-CREATE TRIGGER z_last_trigger ...
+-- Извлечение конкретного поля
+SELECT new_data->>'premium' AS premium FROM audit.data_audit_log;
+
+-- Проверка наличия ключа
+SELECT * FROM audit.data_audit_log WHERE new_data ? 'policy_number';
+
+-- Проверка вложенных значений
+SELECT * FROM audit.data_audit_log WHERE new_data @> '{"status": "active"}';
+
+-- Все ключи в JSONB
+SELECT jsonb_object_keys(new_data) FROM audit.data_audit_log LIMIT 1;
 ```
 
-### Возвращаемые значения
+### Зачем нужна цифровая подпись (log_hash)?
 
-**BEFORE ROW триггеры:**
-- `RETURN NEW` — операция продолжится с (возможно измененной) строкой
-- `RETURN OLD` — для DELETE, использовать исходную версию
-- `RETURN NULL` — операция для этой строки отменяется (не откат транзакции!)
+**Проблема:** Администратор БД (или злоумышленник с доступом) может изменить данные в таблице аудита напрямую, скрыв следы.
 
-**AFTER ROW триггеры:**
-- Возвращаемое значение игнорируется, но обязательно
-- Обычно `RETURN NEW` или `RETURN OLD`
+**Решение:** Криптографический хеш SHA256
+- Вычисляется от всех ключевых данных записи
+- Любое изменение данных приведет к несоответствию хеша
+- SHA256 - криптографически стойкая функция (невозможно подобрать данные под хеш)
 
-**STATEMENT триггеры:**
-- Возвращаемое значение игнорируется
-- Обычно `RETURN NULL`
-
-### Специальные переменные в триггерах
-
-```plpgsql
--- Информация о триггере
-TG_NAME         -- имя триггера
-TG_WHEN         -- 'BEFORE', 'AFTER', 'INSTEAD OF'
-TG_LEVEL        -- 'ROW' или 'STATEMENT'
-TG_OP           -- 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'
-TG_RELID        -- OID таблицы
-TG_TABLE_NAME   -- имя таблицы
-TG_TABLE_SCHEMA -- схема таблицы
-TG_NARGS        -- количество аргументов
-TG_ARGV[]       -- массив аргументов
-
--- Данные строки
-NEW             -- новая версия строки (INSERT, UPDATE)
-OLD             -- старая версия строки (UPDATE, DELETE)
-```
-
-### Производительность триггеров
-
-**Плюсы:**
-- Гарантируют целостность данных на уровне БД
-- Прозрачны для приложений
-- Централизованная логика
-
-**Минусы:**
-- Накладные расходы на каждую операцию
-- Могут значительно замедлить массовые операции
-- Сложность отладки
-- "Скрытая" логика, невидимая в SQL-запросах
-
-**Оптимизация:**
-- Используйте WHEN для фильтрации ненужных срабатываний
-- Используйте STATEMENT-level триггеры где возможно
-- Отключайте триггеры при массовой загрузке данных
-- Избегайте сложной логики в триггерах
-
-### Ограничения триггеров
-
-**Нельзя создать триггер на:**
-- Системные каталоги
-- Представления (кроме INSTEAD OF)
-- Партиционированные таблицы (только на партиции)
-
-**Нельзя использовать:**
-- Команды управления транзакциями (COMMIT, ROLLBACK) внутри триггерной функции
-- Прямые возвращаемые значения (вместо RETURN)
-
-**Рекурсия:**
-- Триггер может вызвать себя через модификацию той же таблицы
-- PostgreSQL не имеет встроенной защиты от бесконечной рекурсии
-- Используйте условия для предотвращения рекурсии
-
-### Практические паттерны
-
-**1. Аудит изменений:**
+**Проверка целостности:**
 ```sql
--- Универсальная функция аудита
-CREATE FUNCTION audit_trigger() RETURNS TRIGGER AS $$
-BEGIN
-    INSERT INTO audit_log (table_name, operation, old_data, new_data, user_name, timestamp)
-    VALUES (TG_TABLE_NAME, TG_OP, row_to_json(OLD), row_to_json(NEW), current_user, now());
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+-- Проверить все логи
+SELECT
+    log_id,
+    audit.verify_log_integrity(log_id) AS is_valid
+FROM audit.data_audit_log;
+
+-- Найти поврежденные записи
+SELECT log_id, changed_at, changed_by
+FROM audit.data_audit_log
+WHERE NOT audit.verify_log_integrity(log_id);
 ```
 
-**2. Автоматическая генерация значений:**
+### SECURITY DEFINER: безопасность vs удобство
+
+**Проблема:** Обычные пользователи должны изменять данные в таблицах (policies, payments), но НЕ должны иметь права INSERT в audit.data_audit_log.
+
+**Решение:** SECURITY DEFINER
+- Функция выполняется с правами владельца (postgres), а не вызывающего
+- Обычный пользователь может вызвать функцию, и она запишет в audit
+- Без SECURITY DEFINER пришлось бы давать всем INSERT на audit (небезопасно)
+
+**Риски SECURITY DEFINER:**
+- SQL-инъекции опасны (функция выполняется с повышенными правами)
+- Нужна тщательная валидация всех параметров
+- В нашем случае безопасно: мы не принимаем параметры от пользователя
+
+### Событийные триггеры vs обычные триггеры
+
+**Обычные триггеры (DML):**
+- Привязаны к конкретной таблице
+- Срабатывают на INSERT/UPDATE/DELETE/TRUNCATE
+- Видят данные строк (OLD, NEW)
+- Могут изменить данные (BEFORE)
+
+**Событийные триггеры (DDL):**
+- Глобальные для всей базы данных
+- Срабатывают на DDL-команды (CREATE, ALTER, DROP)
+- Не видят данные строк, видят метаданные объектов
+- Не могут изменить структуру, только отменить команду
+
+**Применение событийных триггеров:**
+- Аудит изменений структуры БД
+- Защита критичных таблиц от удаления
+- Автоматизация (например, создание audit-триггеров на новые таблицы)
+- Репликация изменений структуры
+
+### Управление триггерами
+
 ```sql
--- Генерация slug из названия
-CREATE FUNCTION generate_slug() RETURNS TRIGGER AS $$
-BEGIN
-    NEW.slug := lower(regexp_replace(NEW.title, '[^a-zA-Z0-9]+', '-', 'g'));
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+-- Отключение всех DML-триггеров на таблице
+ALTER TABLE insurance_system.policies DISABLE TRIGGER ALL;
+
+-- Включение триггеров
+ALTER TABLE insurance_system.policies ENABLE TRIGGER ALL;
+
+-- Отключение конкретного триггера
+ALTER TABLE insurance_system.policies DISABLE TRIGGER trg_audit_policies_insert;
+
+-- Отключение событийного триггера (от имени суперпользователя)
+ALTER EVENT TRIGGER evt_audit_ddl_command DISABLE;
+
+-- Включение событийного триггера
+ALTER EVENT TRIGGER evt_audit_ddl_command ENABLE;
+
+-- Удаление событийного триггера
+DROP EVENT TRIGGER evt_audit_ddl_command;
 ```
 
-**3. Валидация бизнес-правил:**
-```sql
--- Проверка диапазона дат
-CREATE FUNCTION validate_date_range() RETURNS TRIGGER AS $$
-BEGIN
-    IF NEW.end_date < NEW.start_date THEN
-        RAISE EXCEPTION 'end_date не может быть раньше start_date';
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-```
+**Когда отключать триггеры:**
+- Массовая загрузка данных (миллионы строк)
+- Миграция данных между базами
+- Обслуживание и восстановление
+- **ВАЖНО:** Отключение триггеров аудита = пропущенные логи!
 
-**4. Каскадные операции:**
-```sql
--- Автоматическое удаление связанных записей
-CREATE FUNCTION cascade_delete() RETURNS TRIGGER AS $$
-BEGIN
-    DELETE FROM related_table WHERE parent_id = OLD.id;
-    RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
-```
+---
 
-**5. Денормализация для производительности:**
-```sql
--- Обновление кэшированных счетчиков
-CREATE FUNCTION update_post_count() RETURNS TRIGGER AS $$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        UPDATE users SET post_count = post_count + 1 WHERE id = NEW.user_id;
-    ELSIF TG_OP = 'DELETE' THEN
-        UPDATE users SET post_count = post_count - 1 WHERE id = OLD.user_id;
-    END IF;
-    RETURN NULL;
-END;
-$$ LANGUAGE plpgsql;
-```
+## Выводы
 
-### Альтернативы триггерам
+В данной лабораторной работе были реализованы:
 
-**Когда НЕ использовать триггеры:**
+1. **Система DML-аудита:**
+   - Универсальная триггерная функция для всех таблиц
+   - Логирование в формате JSONB
+   - Цифровая подпись SHA256 для обнаружения подмен
+   - Защита от изменения логов
+   - Разграничение доступа (только администратор)
 
-1. **Простая валидация** → CHECK constraints
-2. **Значения по умолчанию** → DEFAULT values
-3. **Связи между таблицами** → Foreign keys with CASCADE
-4. **Сложная бизнес-логика** → Application code
-5. **Асинхронные операции** → Background jobs, очереди
+2. **Система DDL-аудита:**
+   - Событийные триггеры для CREATE/ALTER/DROP
+   - Логирование полного текста команд
+   - Фильтрация временных объектов
+   - Отдельная схема для изоляции данных
 
-**Правило:** Используйте триггеры для логики, которая ДОЛЖНА выполняться на уровне БД для обеспечения целостности данных.
+3. **Механизмы безопасности:**
+   - Изоляция через отдельную схему audit
+   - SECURITY DEFINER для контролируемого повышения прав
+   - Защитные триггеры против модификации логов
+   - Криптографическая проверка целостности
+
+4. **Практическое применение:**
+   - Соответствие требованиям аудита (SOX, GDPR, PCI DSS)
+   - Forensics: расследование инцидентов безопасности
+   - Compliance: доказательство соответствия регуляторным требованиям
+   - Change tracking: отслеживание всех изменений данных
+
+Правильно настроенная система аудита - критически важный компонент любой промышленной базы данных, обеспечивающий прозрачность, безопасность и соответствие нормативным требованиям.
