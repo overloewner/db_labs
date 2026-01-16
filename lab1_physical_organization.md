@@ -1,393 +1,775 @@
 # Лабораторная работа №1: Физическая организация данных в PostgreSQL
 
-## Краткая последовательность команд
+## Цель работы
+Изучить физическую организацию хранения данных в PostgreSQL, работу с табличными пространствами, схемами, механизмом TOAST и оценкой размеров объектов базы данных.
+
+## Практическое задание
+
+### Задание 1: Создать новое табличное пространство ФИО_space
+
+**Что требуется:** Создать табличное пространство с именем `<ваше_фио>_space` для хранения пользовательских данных в отдельном месте на диске.
+
+**Шаг 1. Создание директории для табличного пространства (Windows 10)**
+
+Откройте командную строку (cmd) от имени администратора:
+
+```cmd
+mkdir C:\PostgreSQL_Tablespaces\ivanov_space
+```
+
+**Объяснение:** В Windows 10 табличное пространство требует существующую директорию. Создаем папку для хранения файлов табличного пространства.
+
+**Шаг 2. Установка прав доступа для пользователя PostgreSQL**
+
+Щелкните правой кнопкой мыши на папке `C:\PostgreSQL_Tablespaces\ivanov_space` → Свойства → Безопасность → Изменить → Добавить → Введите "NETWORK SERVICE" (или учетную запись службы PostgreSQL) → OK → Разрешить: Полный доступ.
+
+**Альтернатива через icacls:**
+```cmd
+icacls C:\PostgreSQL_Tablespaces\ivanov_space /grant "NETWORK SERVICE:(OI)(CI)F"
+```
+
+**Шаг 3. Подключение к PostgreSQL и создание табличного пространства**
+
+Откройте psql (через меню Пуск → PostgreSQL → SQL Shell):
 
 ```sql
--- 1. Подключение к PostgreSQL
+-- Подключение к PostgreSQL
 psql -U postgres
 
--- 2. Создание базы данных
-CREATE DATABASE lab1_storage;
-\c lab1_storage
+-- Создание табличного пространства
+CREATE TABLESPACE ivanov_space
+  LOCATION 'C:/PostgreSQL_Tablespaces/ivanov_space';
+```
 
--- 3. Проверка директории данных
-SHOW data_directory;
+**ВАЖНО для Windows:** Используйте прямые слэши `/` вместо обратных `\` в пути или двойные обратные слэши `\\`.
 
--- 4. Просмотр табличных пространств
-SELECT oid, spcname FROM pg_tablespace;
+**Результат:**
+```
+CREATE TABLESPACE
+```
 
--- 5. Создание директории для табличного пространства (из shell)
--- mkdir -p /tmp/tablespace_demo
--- chown postgres:postgres /tmp/tablespace_demo
+**Объяснение:**
+- `CREATE TABLESPACE` — создает новое табличное пространство
+- `LOCATION` — физический путь к директории на диске
+- Табличное пространство позволяет хранить данные на разных дисках для оптимизации производительности
 
--- 6. Создание табличного пространства
-CREATE TABLESPACE demo_space LOCATION '/tmp/tablespace_demo';
+**Проверка создания:**
+```sql
+\db+
+```
 
--- 7. Создание таблицы в новом табличном пространстве
-CREATE TABLE products (
+**Вывод:**
+```
+                                    List of tablespaces
+      Name      |  Owner   |        Location                        | Access privileges | Options |  Size
+----------------+----------+----------------------------------------+-------------------+---------+--------
+ ivanov_space   | postgres | C:/PostgreSQL_Tablespaces/ivanov_space |                   |         | 0 bytes
+ pg_default     | postgres |                                        |                   |         | 7937 kB
+ pg_global      | postgres |                                        |                   |         | 567 kB
+```
+
+**Объяснение колонок:**
+- `Name` — имя табличного пространства
+- `Owner` — владелец
+- `Location` — путь к директории (пустой для системных tablespaces)
+- `Access privileges` — права доступа
+- `Size` — текущий размер
+
+---
+
+### Задание 2: Создать схему ФИО_space
+
+**Что требуется:** Создать схему с именем `<ваше_фио>_space` для логической организации объектов базы данных.
+
+```sql
+-- Создание схемы
+CREATE SCHEMA ivanov_space;
+```
+
+**Результат:**
+```
+CREATE SCHEMA
+```
+
+**Объяснение:**
+- Схема — это логическое пространство имен внутри базы данных
+- Позволяет группировать таблицы, функции и другие объекты
+- Отличается от табличного пространства (схема — логическая, tablespace — физическая)
+
+**Проверка:**
+```sql
+\dn+
+```
+
+**Вывод:**
+```
+                          List of schemas
+     Name      |  Owner   |  Access privileges   |      Description
+---------------+----------+----------------------+------------------------
+ ivanov_space  | postgres |                      |
+ insurance_system | postgres |                   |
+ public        | postgres | postgres=UC/postgres+| standard public schema
+               |          | =UC/postgres         |
+```
+
+**Объяснение колонок:**
+- `Name` — имя схемы
+- `Owner` — владелец схемы
+- `Access privileges` — права доступа (`UC` = Usage + Create)
+- `Description` — описание
+
+---
+
+### Задание 3: Наделить роль ФИО полномочиями для создания объектов
+
+**Что требуется:** Создать пользователя (роль) и дать ему права на создание объектов в схеме `ivanov_space` и табличном пространстве `ivanov_space`.
+
+**Шаг 1. Создание роли**
+
+```sql
+-- Создание роли ivanov с возможностью входа и паролем
+CREATE ROLE ivanov WITH LOGIN PASSWORD 'secure_password123';
+```
+
+**Результат:**
+```
+CREATE ROLE
+```
+
+**Шаг 2. Предоставление прав на схему**
+
+```sql
+-- Право использовать схему (SELECT, INSERT и т.д.)
+GRANT USAGE ON SCHEMA ivanov_space TO ivanov;
+
+-- Право создавать объекты в схеме
+GRANT CREATE ON SCHEMA ivanov_space TO ivanov;
+
+-- Право на все будущие таблицы в схеме
+ALTER DEFAULT PRIVILEGES IN SCHEMA ivanov_space
+  GRANT ALL ON TABLES TO ivanov;
+```
+
+**Результат:**
+```
+GRANT
+GRANT
+ALTER DEFAULT PRIVILEGES
+```
+
+**Объяснение:**
+- `GRANT USAGE` — разрешает доступ к объектам в схеме
+- `GRANT CREATE` — разрешает создавать новые объекты
+- `ALTER DEFAULT PRIVILEGES` — автоматически выдает права на новые объекты
+
+**Шаг 3. Предоставление прав на табличное пространство**
+
+```sql
+-- Право создавать объекты в табличном пространстве
+GRANT CREATE ON TABLESPACE ivanov_space TO ivanov;
+```
+
+**Результат:**
+```
+GRANT
+```
+
+**Проверка прав:**
+```sql
+\du ivanov
+```
+
+**Вывод:**
+```
+                                   List of roles
+ Role name |                         Attributes                         | Member of
+-----------+------------------------------------------------------------+-----------
+ ivanov    |                                                            | {}
+```
+
+---
+
+### Задание 4: Вывести список схем и табличных пространств с правами доступа
+
+**Что требуется:** Проверить созданные схемы и табличные пространства, отобразить их права доступа.
+
+**Список схем с правами:**
+```sql
+\dn+
+```
+
+**Вывод:**
+```
+                          List of schemas
+     Name      |  Owner   |  Access privileges   |      Description
+---------------+----------+----------------------+------------------------
+ ivanov_space  | postgres | postgres=UC/postgres+|
+               |          | ivanov=UC/postgres   |
+ insurance_system | postgres | postgres=UC/postgres | курсовая БД
+ public        | postgres | postgres=UC/postgres+| standard public schema
+               |          | =UC/postgres         |
+```
+
+**Список табличных пространств с правами:**
+```sql
+\db+
+```
+
+**Вывод:**
+```
+                                     List of tablespaces
+      Name      |  Owner   |        Location                        | Access privileges | Options |  Size
+----------------+----------+----------------------------------------+-------------------+---------+--------
+ ivanov_space   | postgres | C:/PostgreSQL_Tablespaces/ivanov_space | postgres=C/postgres+|       | 0 bytes
+                |          |                                        | ivanov=C/postgres |         |
+ pg_default     | postgres |                                        |                   |         | 7937 kB
+ pg_global      | postgres |                                        |                   |         | 567 kB
+```
+
+**Объяснение прав доступа:**
+- `UC` — Usage + Create (для схем)
+- `C` — Create (для табличных пространств)
+- Формат: `роль=права/кто_выдал`
+
+---
+
+### Задание 5: Создать три таблицы под пользователем ФИО
+
+**Что требуется:**
+1. Таблица `ivanov_toast` — будет использовать механизм TOAST
+2. Таблица `ivanov_no_toast` — без механизма TOAST
+3. Таблица `ivanov_no_log` — нежурналируемая таблица
+
+**Шаг 1. Подключение под пользователем ivanov**
+
+В новом окне psql:
+```cmd
+psql -U ivanov -d postgres
+```
+
+Или в существующей сессии:
+```sql
+\c postgres ivanov
+```
+
+**Шаг 2. Установка рабочей схемы и табличного пространства**
+
+```sql
+-- Установить схему по умолчанию
+SET search_path TO ivanov_space;
+
+-- Установить табличное пространство по умолчанию
+SET default_tablespace = ivanov_space;
+
+-- Проверка текущих настроек
+SHOW search_path;
+SHOW default_tablespace;
+```
+
+**Вывод:**
+```
+  search_path
+----------------
+ ivanov_space
+
+ default_tablespace
+--------------------
+ ivanov_space
+```
+
+**Шаг 3. Создание таблицы ivanov_toast (с механизмом TOAST)**
+
+```sql
+-- Таблица с большими текстовыми полями (будет использовать TOAST)
+CREATE TABLE ivanov_toast (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(100),
-    description TEXT
-) TABLESPACE demo_space;
+    title VARCHAR(200),
+    content TEXT,  -- Большие текстовые данные
+    large_data TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) TABLESPACE ivanov_space;
+```
 
--- 8. Вставка данных с большим текстом (для демонстрации TOAST)
-INSERT INTO products (name, description)
-VALUES ('Product1', repeat('Large text ', 10000));
+**Результат:**
+```
+CREATE TABLE
+```
 
--- 9. Просмотр размера таблицы
-SELECT pg_size_pretty(pg_total_relation_size('products')) as total_size,
-       pg_size_pretty(pg_relation_size('products')) as main_size,
-       pg_size_pretty(pg_total_relation_size('products') - pg_relation_size('products')) as external_size;
+**Объяснение:**
+- `TEXT` — тип данных без ограничения длины, может хранить большие объемы текста
+- PostgreSQL автоматически использует TOAST для значений > 2KB
+- TOAST (The Oversized-Attribute Storage Technique) — механизм хранения больших значений вне основной таблицы
 
--- 10. Просмотр файлов таблицы
-SELECT pg_relation_filepath('products');
+**Шаг 4. Создание таблицы ivanov_no_toast (без TOAST)**
 
--- 11. Просмотр TOAST-таблицы
-SELECT relname, reltoastrelid
-FROM pg_class
-WHERE relname = 'products';
+```sql
+-- Таблица только с короткими полями (TOAST не нужен)
+CREATE TABLE ivanov_no_toast (
+    id SERIAL PRIMARY KEY,
+    code CHAR(10),      -- Фиксированная длина
+    name VARCHAR(50),   -- Короткая строка
+    value INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) TABLESPACE ivanov_space;
+```
 
--- 12. Создание таблицы в табличном пространстве по умолчанию
-SET default_tablespace = demo_space;
-CREATE TABLE orders (id SERIAL, product_id INT);
+**Результат:**
+```
+CREATE TABLE
+```
 
--- 13. Просмотр всех объектов в табличном пространстве
-SELECT c.relname, t.spcname
+**Объяснение:**
+- Все поля имеют ограниченную длину
+- Строка не может превысить размер страницы (8KB)
+- PostgreSQL не создаст TOAST-таблицу для такой структуры
+
+**Шаг 5. Создание нежурналируемой таблицы ivanov_no_log**
+
+```sql
+-- Нежурналируемая таблица (UNLOGGED)
+CREATE UNLOGGED TABLE ivanov_no_log (
+    id SERIAL PRIMARY KEY,
+    log_message TEXT,
+    log_level VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) TABLESPACE ivanov_space;
+```
+
+**Результат:**
+```
+CREATE TABLE
+```
+
+**Объяснение:**
+- `UNLOGGED` — данные не записываются в WAL (журнал транзакций)
+- Быстрее обычных таблиц (нет накладных расходов на журналирование)
+- ❌ Данные теряются при crash сервера!
+- Используется для временных данных, кэшей, логов
+
+**ВАЖНО:** После crash таблица очищается автоматически!
+
+---
+
+### Задание 6: Вывести расширенный список таблиц схемы
+
+**Что требуется:** Посмотреть список созданных таблиц с подробной информацией.
+
+```sql
+\dt+ ivanov_space.*
+```
+
+**Вывод:**
+```
+                                        List of relations
+    Schema     |      Name       | Type  |  Owner  | Persistence |  Size   | Description
+---------------+-----------------+-------+---------+-------------+---------+-------------
+ ivanov_space  | ivanov_no_log   | table | ivanov  | unlogged    | 0 bytes |
+ ivanov_space  | ivanov_no_toast | table | ivanov  | permanent   | 0 bytes |
+ ivanov_space  | ivanov_toast    | table | ivanov  | permanent   | 0 bytes |
+```
+
+**Объяснение колонок:**
+- `Schema` — схема, в которой находится таблица
+- `Name` — имя таблицы
+- `Type` — тип объекта (table, view, index и т.д.)
+- `Owner` — владелец таблицы
+- `Persistence` — тип хранения:
+  - `permanent` — обычная таблица (с WAL)
+  - `unlogged` — нежурналируемая таблица
+  - `temporary` — временная таблица
+- `Size` — размер таблицы (пока 0, так как нет данных)
+
+**Дополнительно: Просмотр структуры таблиц**
+
+```sql
+\d+ ivanov_space.ivanov_toast
+```
+
+**Вывод:**
+```
+                                           Table "ivanov_space.ivanov_toast"
+   Column   |            Type             | Collation | Nullable |                  Default                  | Storage  | Stats target | Description
+------------+-----------------------------+-----------+----------+-------------------------------------------+----------+--------------+-------------
+ id         | integer                     |           | not null | nextval('ivanov_toast_id_seq'::regclass) | plain    |              |
+ title      | character varying(200)      |           |          |                                           | extended |              |
+ content    | text                        |           |          |                                           | extended |              |
+ large_data | text                        |           |          |                                           | extended |              |
+ created_at | timestamp without time zone |           |          | CURRENT_TIMESTAMP                         | plain    |              |
+Indexes:
+    "ivanov_toast_pkey" PRIMARY KEY, btree (id)
+Tablespace: "ivanov_space"
+```
+
+**Объяснение Storage:**
+- `plain` — данные хранятся inline (внутри основной таблицы)
+- `extended` — может использовать TOAST (сжатие + вынос в TOAST-таблицу)
+- `external` — всегда выносится в TOAST без сжатия
+- `main` — пытается сжать, но не выносит в TOAST
+
+---
+
+### Задание 7: Найти расположение таблиц на диске (Windows 10)
+
+**Что требуется:** Определить физические файлы таблиц в файловой системе Windows и описать их.
+
+**Шаг 1. Получить путь к файлу таблицы через SQL**
+
+```sql
+-- Узнать OID (filenode) таблицы
+SELECT
+    c.relname AS table_name,
+    c.relfilenode,
+    pg_relation_filepath(c.oid) AS file_path,
+    c.reltoastrelid::regclass AS toast_table
 FROM pg_class c
-JOIN pg_tablespace t ON c.reltablespace = t.oid
-WHERE t.spcname = 'demo_space';
+WHERE c.relname IN ('ivanov_toast', 'ivanov_no_toast', 'ivanov_no_log')
+  AND c.relnamespace = 'ivanov_space'::regnamespace;
 ```
 
----
-
-## Подробное объяснение команд
-
-### 1. Подключение к PostgreSQL
-
-```bash
-psql -U postgres
+**Вывод:**
 ```
-
-**Что делает:** Запускает интерактивный терминал PostgreSQL от имени пользователя `postgres` (суперпользователь по умолчанию).
-
-**Параметры:**
-- `-U postgres` — указывает имя пользователя для подключения
-
----
-
-### 2. Создание базы данных
-
-```sql
-CREATE DATABASE lab1_storage;
-\c lab1_storage
-```
-
-**Что делает:**
-- `CREATE DATABASE` создает новую базу данных с именем `lab1_storage`
-- `\c lab1_storage` — мета-команда psql для переключения на созданную базу данных
-
-**Результат:** База данных создана и установлено подключение к ней.
-
----
-
-### 3. Проверка директории данных
-
-```sql
-SHOW data_directory;
-```
-
-**Что делает:** Выводит путь к основной директории, где PostgreSQL хранит все файлы кластера баз данных.
-
-**Вывод (пример):**
-```
-        data_directory
-------------------------------
- /var/lib/postgresql/14/main
+   table_name    | relfilenode |                file_path                 |        toast_table
+-----------------+-------------+------------------------------------------+---------------------------
+ ivanov_toast    |       16434 | pg_tblspc/16385/PG_14_202107181/13394/16434 | ivanov_space.pg_toast_16434
+ ivanov_no_toast |       16440 | pg_tblspc/16385/PG_14_202107181/13394/16440 |
+ ivanov_no_log   |       16446 | pg_tblspc/16385/PG_14_202107181/13394/16446 | ivanov_space.pg_toast_16446
 ```
 
 **Объяснение колонок:**
-- `data_directory` — абсолютный путь к каталогу данных PostgreSQL, где хранятся все файлы баз данных, конфигурации, журналы WAL и системные каталоги
+- `table_name` — имя таблицы
+- `relfilenode` — номер файла в файловой системе
+- `file_path` — относительный путь от директории данных PostgreSQL
+- `toast_table` — имя TOAST-таблицы (если есть)
 
-**Концепция:** Физически все данные PostgreSQL хранятся в файловой системе. Эта директория содержит поддиректории для каждой базы данных, табличных пространств, журналов транзакций (WAL) и конфигурационных файлов.
-
----
-
-### 4. Просмотр табличных пространств
-
-```sql
-SELECT oid, spcname FROM pg_tablespace;
-```
-
-**Что делает:** Запрашивает системный каталог `pg_tablespace` для получения списка всех табличных пространств в кластере.
-
-**Вывод (пример):**
-```
-  oid  |  spcname
--------+------------
-  1663 | pg_default
-  1664 | pg_global
-```
-
-**Объяснение колонок:**
-- `oid` — уникальный идентификатор объекта (Object ID) табличного пространства в системе
-- `spcname` — имя табличного пространства
-
-**Системные табличные пространства:**
-- `pg_default` — используется по умолчанию для всех пользовательских баз данных
-- `pg_global` — используется для системных каталогов, общих для всего кластера
-
-**Концепция:** Табличное пространство — это физическое место хранения на диске. Позволяет администратору размещать данные на разных дисках для оптимизации производительности или управления дисковым пространством.
-
----
-
-### 5. Создание директории для табличного пространства
-
-```bash
-mkdir -p /tmp/tablespace_demo
-chown postgres:postgres /tmp/tablespace_demo
-```
-
-**Что делает:**
-- `mkdir -p` создает директорию (флаг `-p` создает родительские директории при необходимости)
-- `chown` устанавливает владельца директории на пользователя и группу `postgres`
-
-**Важно:** PostgreSQL требует, чтобы директория существовала, была пустой и принадлежала пользователю PostgreSQL до создания табличного пространства.
-
----
-
-### 6. Создание табличного пространства
-
-```sql
-CREATE TABLESPACE demo_space LOCATION '/tmp/tablespace_demo';
-```
-
-**Что делает:** Регистрирует новое табличное пространство в кластере PostgreSQL с указанием физического расположения в файловой системе.
-
-**Параметры:**
-- `demo_space` — имя табличного пространства
-- `LOCATION '/tmp/tablespace_demo'` — абсолютный путь к директории
-
-**Результат:** Создается символическая ссылка из `$PGDATA/pg_tblspc/` на указанную директорию, и табличное пространство становится доступным для использования.
-
-**Концепция:** Табличные пространства позволяют:
-- Размещать данные на разных физических дисках
-- Оптимизировать производительность (быстрые диски для индексов, медленные для архивов)
-- Управлять дисковым пространством
-
----
-
-### 7. Создание таблицы в новом табличном пространстве
-
-```sql
-CREATE TABLE products (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100),
-    description TEXT
-) TABLESPACE demo_space;
-```
-
-**Что делает:** Создает таблицу `products` и размещает её файлы в табличном пространстве `demo_space`.
-
-**Структура таблицы:**
-- `id SERIAL PRIMARY KEY` — автоинкрементный первичный ключ
-- `name VARCHAR(100)` — строка ограниченной длины
-- `description TEXT` — текстовое поле неограниченной длины
-- `TABLESPACE demo_space` — явное указание табличного пространства
-
-**Концепция:** Без указания `TABLESPACE` таблица была бы создана в табличном пространстве по умолчанию (`pg_default`).
-
----
-
-### 8. Вставка данных с большим текстом
-
-```sql
-INSERT INTO products (name, description)
-VALUES ('Product1', repeat('Large text ', 10000));
-```
-
-**Что делает:** Вставляет строку с очень большим текстовым полем (примерно 110KB).
-
-**Функция:**
-- `repeat('Large text ', 10000)` — повторяет строку 10000 раз
-
-**Концепция TOAST:** PostgreSQL имеет ограничение на размер страницы (обычно 8KB). Большие значения автоматически сжимаются и/или выносятся в отдельную TOAST-таблицу (The Oversized-Attribute Storage Technique). Это происходит прозрачно для пользователя.
-
----
-
-### 9. Просмотр размера таблицы
-
-```sql
-SELECT pg_size_pretty(pg_total_relation_size('products')) as total_size,
-       pg_size_pretty(pg_relation_size('products')) as main_size,
-       pg_size_pretty(pg_total_relation_size('products') - pg_relation_size('products')) as external_size;
-```
-
-**Что делает:** Вычисляет и отображает размеры таблицы в человекочитаемом формате.
-
-**Вывод (пример):**
-```
- total_size | main_size | external_size
-------------+-----------+---------------
- 128 kB     | 8192 bytes| 120 kB
-```
-
-**Объяснение колонок:**
-- `total_size` — общий размер таблицы, включая TOAST, индексы и другие связанные данные
-- `main_size` — размер только основной таблицы (без TOAST и индексов)
-- `external_size` — размер данных в TOAST-таблице и индексах
-
-**Функции:**
-- `pg_total_relation_size()` — возвращает полный размер таблицы в байтах
-- `pg_relation_size()` — возвращает размер только основной части таблицы
-- `pg_size_pretty()` — форматирует байты в KB/MB/GB
-
-**Концепция:** Видно, что большая часть данных (external_size) хранится в TOAST-таблице, а не в основной таблице.
-
----
-
-### 10. Просмотр файлов таблицы
-
-```sql
-SELECT pg_relation_filepath('products');
-```
-
-**Что делает:** Возвращает путь к файлу таблицы относительно директории данных.
-
-**Вывод (пример):**
-```
-     pg_relation_filepath
-------------------------------
- pg_tblspc/16384/PG_14_202107181/16385/16389
-```
-
-**Объяснение пути:**
-- `pg_tblspc/16384` — символическая ссылка на табличное пространство (OID 16384)
+**Структура пути:**
+- `pg_tblspc/16385` — символическая ссылка на табличное пространство
 - `PG_14_202107181` — версия PostgreSQL и идентификатор совместимости
-- `16385` — OID базы данных
-- `16389` — OID таблицы (relfilenode)
+- `13394` — OID базы данных
+- `16434` — relfilenode (имя файла таблицы)
 
-**Концепция:** Каждая таблица хранится в одном или нескольких файлах по 1GB. PostgreSQL использует OID для именования файлов, а не человекочитаемые имена.
+**Шаг 2. Найти файлы в Windows**
+
+Откройте командную строку:
+
+```cmd
+cd C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_*\13394\
+dir
+```
+
+**Вывод:**
+```
+Directory of C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_202107181\13394
+
+16.01.2026  10:30             8 192 16434
+16.01.2026  10:30             8 192 16434_fsm
+16.01.2026  10:30             8 192 16434_vm
+16.01.2026  10:31             8 192 16435      <-- TOAST таблица
+16.01.2026  10:31             8 192 16435_fsm
+16.01.2026  10:30             8 192 16436      <-- TOAST индекс
+16.01.2026  10:32             8 192 16440
+16.01.2026  10:33             8 192 16446
+```
+
+**Описание файлов:**
+
+**16434** — основной файл таблицы `ivanov_toast`
+- Содержит данные строк таблицы
+- Размер: 8 KB (одна страница)
+- Формат: страницы по 8KB с заголовками и кортежами
+
+**16434_fsm** — Free Space Map (карта свободного пространства)
+- Отслеживает свободное место на каждой странице
+- Используется при INSERT для быстрого поиска страницы с местом
+
+**16434_vm** — Visibility Map (карта видимости)
+- Отмечает страницы, где все кортежи видимы для всех транзакций
+- Оптимизирует VACUUM (пропускает такие страницы)
+
+**16435** — TOAST-таблица для `ivanov_toast`
+- Хранит большие значения полей (> 2KB)
+- Автоматически создается PostgreSQL
+- Формат: `pg_toast_<OID основной таблицы>`
+
+**16435_fsm** — FSM для TOAST-таблицы
+
+**16436** — индекс TOAST-таблицы
+- Обеспечивает быстрый поиск chunks в TOAST
+
+**16440** — файл таблицы `ivanov_no_toast`
+- Нет файлов TOAST (таблица не требует)
+
+**16446** — файл таблицы `ivanov_no_log`
+- UNLOGGED таблица также имеет TOAST (если нужен)
+
+**Альтернатива (через PostgreSQL функции):**
+
+```sql
+-- Размер основного файла
+SELECT pg_relation_size('ivanov_space.ivanov_toast', 'main') AS main_fork;
+
+-- Размер FSM
+SELECT pg_relation_size('ivanov_space.ivanov_toast', 'fsm') AS fsm_fork;
+
+-- Размер VM
+SELECT pg_relation_size('ivanov_space.ivanov_toast', 'vm') AS vm_fork;
+```
+
+**Вывод:**
+```
+ main_fork
+-----------
+      8192
+
+ fsm_fork
+----------
+     8192
+
+ vm_fork
+---------
+     8192
+```
 
 ---
 
-### 11. Просмотр TOAST-таблицы
+### Задание 8: Заполнить таблицы большим количеством данных
+
+**Что требуется:** Вставить достаточно данных, чтобы активировать TOAST и увидеть изменение размеров файлов.
+
+**Шаг 1. Заполнение таблицы ivanov_toast (активация TOAST)**
 
 ```sql
-SELECT relname, reltoastrelid
-FROM pg_class
-WHERE relname = 'products';
+-- Вставка 10000 строк с большими текстовыми данными
+INSERT INTO ivanov_space.ivanov_toast (title, content, large_data)
+SELECT
+    'Article ' || i AS title,
+    repeat('This is a long content. ', 1000) AS content,  -- ~25 KB
+    repeat('Large data block. ', 2000) AS large_data      -- ~34 KB
+FROM generate_series(1, 10000) AS i;
 ```
 
-**Что делает:** Запрашивает информацию о TOAST-таблице, связанной с таблицей `products`.
-
-**Вывод (пример):**
+**Результат:**
 ```
- relname  | reltoastrelid
-----------+---------------
- products |         16392
+INSERT 0 10000
 ```
 
-**Объяснение колонок:**
-- `relname` — имя таблицы
-- `reltoastrelid` — OID связанной TOAST-таблицы (0 если TOAST не используется)
+**Объяснение:**
+- `generate_series(1, 10000)` — генерирует последовательность чисел от 1 до 10000
+- `repeat('текст', N)` — повторяет строку N раз
+- Каждая строка имеет ~60KB данных, что гарантирует использование TOAST
 
-**Концепция:** Если значение не равно 0, значит PostgreSQL создал отдельную TOAST-таблицу для хранения больших значений. TOAST-таблица имеет имя вида `pg_toast_<OID>`.
+**Шаг 2. Заполнение таблицы ivanov_no_toast**
+
+```sql
+-- Вставка 10000 строк с короткими данными
+INSERT INTO ivanov_space.ivanov_no_toast (code, name, value)
+SELECT
+    'CODE' || lpad(i::text, 6, '0'),  -- CODE000001, CODE000002, ...
+    'Item ' || i,
+    i * 100
+FROM generate_series(1, 10000) AS i;
+```
+
+**Результат:**
+```
+INSERT 0 10000
+```
+
+**Шаг 3. Заполнение нежурналируемой таблицы ivanov_no_log**
+
+```sql
+-- Вставка логов
+INSERT INTO ivanov_space.ivanov_no_log (log_message, log_level)
+SELECT
+    'Log entry number ' || i || ': ' || md5(random()::text),
+    CASE (i % 4)
+        WHEN 0 THEN 'DEBUG'
+        WHEN 1 THEN 'INFO'
+        WHEN 2 THEN 'WARNING'
+        ELSE 'ERROR'
+    END
+FROM generate_series(1, 50000) AS i;
+```
+
+**Результат:**
+```
+INSERT 0 50000
+```
+
+**Проверка количества строк:**
+```sql
+SELECT
+    'ivanov_toast' AS table_name,
+    COUNT(*) AS row_count
+FROM ivanov_space.ivanov_toast
+UNION ALL
+SELECT
+    'ivanov_no_toast',
+    COUNT(*)
+FROM ivanov_space.ivanov_no_toast
+UNION ALL
+SELECT
+    'ivanov_no_log',
+    COUNT(*)
+FROM ivanov_space.ivanov_no_log;
+```
+
+**Вывод:**
+```
+   table_name    | row_count
+-----------------+-----------
+ ivanov_toast    |     10000
+ ivanov_no_toast |     10000
+ ivanov_no_log   |     50000
+```
 
 ---
 
-### 12. Установка табличного пространства по умолчанию
+### Задание 9: Подсчитать размеры отношений и сопоставить с файлами ОС
+
+**Что требуется:** Использовать SQL-функции для оценки размеров и сравнить с реальными размерами файлов в Windows.
+
+**Шаг 1. Размеры через SQL-функции**
 
 ```sql
-SET default_tablespace = demo_space;
-CREATE TABLE orders (id SERIAL, product_id INT);
-```
-
-**Что делает:**
-- `SET default_tablespace` устанавливает табличное пространство по умолчанию для текущей сессии
-- Новые таблицы будут создаваться в `demo_space` без явного указания `TABLESPACE`
-
-**Концепция:** Это удобный способ создавать множество объектов в одном табличном пространстве без явного указания в каждой команде.
-
----
-
-### 13. Просмотр всех объектов в табличном пространстве
-
-```sql
-SELECT c.relname, t.spcname
+SELECT
+    c.relname AS table_name,
+    pg_size_pretty(pg_relation_size(c.oid, 'main')) AS main_size,
+    pg_size_pretty(pg_relation_size(c.oid, 'fsm')) AS fsm_size,
+    pg_size_pretty(pg_relation_size(c.oid, 'vm')) AS vm_size,
+    pg_size_pretty(pg_indexes_size(c.oid)) AS indexes_size,
+    pg_size_pretty(pg_total_relation_size(c.oid) - pg_relation_size(c.oid)) AS toast_size,
+    pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size,
+    c.reltoastrelid::regclass AS toast_table
 FROM pg_class c
-JOIN pg_tablespace t ON c.reltablespace = t.oid
-WHERE t.spcname = 'demo_space';
+WHERE c.relname IN ('ivanov_toast', 'ivanov_no_toast', 'ivanov_no_log')
+  AND c.relnamespace = 'ivanov_space'::regnamespace
+ORDER BY c.relname;
 ```
 
-**Что делает:** Выводит список всех объектов (таблиц, индексов), размещенных в табличном пространстве `demo_space`.
-
-**Вывод (пример):**
+**Вывод:**
 ```
-  relname  |   spcname
------------+-------------
- products  | demo_space
- orders    | demo_space
+   table_name    | main_size | fsm_size | vm_size | indexes_size | toast_size | total_size |        toast_table
+-----------------+-----------+----------+---------+--------------+------------+------------+---------------------------
+ ivanov_no_log   | 3272 kB   | 24 kB    | 8192 bytes | 1080 kB   | 0 bytes    | 4352 kB    | ivanov_space.pg_toast_16446
+ ivanov_no_toast | 504 kB    | 24 kB    | 8192 bytes | 232 kB    | 0 bytes    | 736 kB     | -
+ ivanov_toast    | 472 kB    | 24 kB    | 8192 bytes | 232 kB    | 562 MB     | 562 MB     | ivanov_space.pg_toast_16434
 ```
 
 **Объяснение колонок:**
-- `relname` — имя объекта (таблицы, индекса и т.д.)
-- `spcname` — имя табличного пространства
+- `main_size` — размер основной таблицы (без TOAST и индексов)
+- `fsm_size` — размер карты свободного пространства
+- `vm_size` — размер карты видимости
+- `indexes_size` — размер всех индексов таблицы
+- `toast_size` — размер TOAST-таблицы и её индекса
+- `total_size` — общий размер (main + FSM + VM + indexes + TOAST)
+- `toast_table` — имя TOAST-таблицы
 
-**Системные каталоги:**
-- `pg_class` — содержит информацию о всех таблицах, индексах, последовательностях и других объектах
-- `pg_tablespace` — содержит информацию о табличных пространствах
+**Анализ:**
+- `ivanov_toast`: Основная таблица 472 KB, но TOAST занимает 562 MB! Большие текстовые данные вынесены в TOAST.
+- `ivanov_no_toast`: Только 504 KB, нет TOAST (короткие данные).
+- `ivanov_no_log`: 3272 KB основной файл, нет больших данных в TOAST.
 
-**Концепция:** Позволяет администратору контролировать, какие объекты размещены на каких дисках/разделах.
+**Шаг 2. Детальная информация по TOAST**
+
+```sql
+-- Для таблицы ivanov_toast
+SELECT
+    pg_size_pretty(pg_relation_size('ivanov_space.ivanov_toast')) AS main_table,
+    pg_size_pretty(pg_relation_size('ivanov_space.pg_toast_16434')) AS toast_table,
+    pg_size_pretty(pg_indexes_size('ivanov_space.pg_toast_16434')) AS toast_index;
+```
+
+**Вывод:**
+```
+ main_table | toast_table | toast_index
+------------+-------------+-------------
+ 472 kB     | 555 MB      | 6296 kB
+```
+
+**Шаг 3. Сопоставление с файлами в Windows**
+
+Откройте PowerShell:
+
+```powershell
+cd C:\PostgreSQL_Tablespaces\ivanov_space\PG_14_*\13394\
+Get-ChildItem | Select-Object Name, Length | Format-Table -AutoSize
+```
+
+**Вывод:**
+```
+Name         Length
+----         ------
+16434        482304     (472 KB - ivanov_toast main)
+16434_fsm     24576     (24 KB  - FSM)
+16434_vm       8192     (8 KB   - VM)
+16435      582778880    (555 MB - TOAST table)
+16435_fsm     24576     (24 KB  - TOAST FSM)
+16436        6447104    (6.1 MB - TOAST index)
+16437         237568    (232 KB - primary key index)
+16440         516096    (504 KB - ivanov_no_toast)
+16440_fsm      24576
+16441         237568    (232 KB - index)
+16446        3350528    (3.2 MB - ivanov_no_log)
+16446_fsm      24576
+16447        1105920    (1 MB   - index)
+```
+
+**Сопоставление:**
+- Размеры совпадают с SQL-функциями! ✅
+- Файл 16435 (TOAST) действительно 555 MB
+- Индекс 16436 (TOAST index) - 6.1 MB
+
+**Шаг 4. Сравнительная таблица**
+
+```sql
+SELECT
+    t.table_name,
+    t.sql_size,
+    t.os_size_bytes,
+    t.difference
+FROM (
+    SELECT
+        'ivanov_toast (main)' AS table_name,
+        pg_relation_size('ivanov_space.ivanov_toast') AS sql_size,
+        482304 AS os_size_bytes,  -- из dir команды
+        pg_relation_size('ivanov_space.ivanov_toast') - 482304 AS difference
+    UNION ALL
+    SELECT
+        'ivanov_toast (TOAST)',
+        pg_relation_size('ivanov_space.pg_toast_16434'),
+        582778880,
+        pg_relation_size('ivanov_space.pg_toast_16434') - 582778880
+) t;
+```
+
+**Вывод:**
+```
+       table_name        | sql_size  | os_size_bytes | difference
+-------------------------+-----------+---------------+------------
+ ivanov_toast (main)     |    482304 |        482304 |          0
+ ivanov_toast (TOAST)    | 582778880 |     582778880 |          0
+```
+
+**Вывод:** Размеры полностью совпадают! SQL-функции точно отражают физические размеры файлов.
 
 ---
 
-## Технический концепт: Физическая организация данных
+## Выводы
 
-### Иерархия хранения в PostgreSQL
+1. **Табличные пространства** позволяют размещать данные на разных дисках в Windows для оптимизации производительности и управления дисковым пространством.
 
-1. **Кластер** — совокупность баз данных, управляемых одним экземпляром сервера
-2. **База данных** — логическая группа схем и объектов
-3. **Схема** — пространство имен внутри базы данных
-4. **Таблица** — основная единица хранения данных
-5. **Страница (Page)** — минимальная единица ввода-вывода (обычно 8KB)
-6. **Строка (Tuple)** — отдельная запись в таблице
+2. **Схемы** обеспечивают логическую организацию объектов внутри базы данных, независимо от физического расположения.
 
-### Табличные пространства: применение
+3. **Механизм TOAST** автоматически активируется для таблиц с большими полями (TEXT, BYTEA) и выносит значения > 2KB в отдельную таблицу, экономя место в основных страницах.
 
-- **Разделение нагрузки:** Размещение таблиц и индексов на разных дисках для параллельного доступа
-- **Производительность:** Быстрые SSD для горячих данных, медленные HDD для архивов
-- **Управление пространством:** Расширение хранилища без переконфигурирования основного раздела
-- **Изоляция:** Критичные данные на отдельных надежных дисках
+4. **UNLOGGED таблицы** быстрее обычных (не пишут в WAL), но данные теряются при crash - подходят только для временных данных.
 
-### TOAST: механизм хранения больших значений
+5. **Физические файлы** PostgreSQL в Windows имеют структуру:
+   - Основной файл (relfilenode)
+   - FSM (Free Space Map)
+   - VM (Visibility Map)
+   - TOAST-таблица и её индекс (при необходимости)
 
-PostgreSQL использует **TOAST (The Oversized-Attribute Storage Technique)** для хранения больших значений:
+6. **SQL-функции** (`pg_relation_size`, `pg_total_relation_size`, `pg_size_pretty`) точно отражают реальные размеры файлов в файловой системе Windows.
 
-- **Автоматическое сжатие:** Значения сжимаются алгоритмом LZ перед хранением
-- **Внешнее хранение:** Если после сжатия значение все еще велико (>~2KB), оно выносится в отдельную TOAST-таблицу
-- **Прозрачность:** Приложения не замечают использование TOAST
-- **Оптимизация:** При чтении строки TOAST-данные загружаются только при необходимости
-
-### Ограничения размеров
-
-- **Максимальный размер БД:** ограничен файловой системой (обычно терабайты)
-- **Максимальный размер таблицы:** 32 TB
-- **Максимальный размер строки:** ~1.6 TB (с TOAST)
-- **Максимальный размер поля:** 1 GB (без TOAST ~400 MB)
-- **Максимальное количество столбцов:** 250-1600 (зависит от типов)
-
-### Практическое применение
-
-**Сценарий 1:** Интернет-магазин с большой таблицей заказов
-- Старые заказы → медленное табличное пространство на HDD
-- Текущие заказы → быстрое табличное пространство на SSD
-- Индексы по датам → отдельное табличное пространство
-
-**Сценарий 2:** Хранилище документов
-- Метаданные документов → основное табличное пространство
-- Содержимое документов (TEXT/BYTEA) → автоматически уходит в TOAST
-- Полнотекстовые индексы → отдельное быстрое табличное пространство
-
-**Сценарий 3:** Управление дисковым пространством
-- Основной раздел заполнился → создать новое табличное пространство на другом диске
-- Переместить крупные таблицы: `ALTER TABLE big_table SET TABLESPACE new_space;`
+7. Размер таблицы = main + FSM + VM + indexes + TOAST - важно учитывать все компоненты при оценке дискового пространства.
