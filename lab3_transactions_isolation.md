@@ -1,809 +1,863 @@
-# Лабораторная работа №3: Транзакции и уровни изоляции в PostgreSQL
+# Лабораторная работа 3: Транзакции и уровни изоляции в PostgreSQL
 
-## Краткая последовательность команд
+## Задание 1: Демонстрация аномалий на уровне изоляции Read Committed
 
-```sql
--- 1. Создание базы данных
-CREATE DATABASE lab3_isolation;
-\c lab3_isolation
-
--- 2. Создание тестовой таблицы
-CREATE TABLE accounts (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(50),
-    balance DECIMAL(10,2)
-);
-
-INSERT INTO accounts (name, balance) VALUES
-    ('Alice', 1000.00),
-    ('Bob', 500.00);
-
--- 3. Просмотр текущего уровня изоляции
-SHOW default_transaction_isolation;
-
--- 4. Демонстрация READ COMMITTED (уровень по умолчанию)
--- Терминал 1:
-BEGIN;
-SELECT * FROM accounts WHERE name = 'Alice';
-
--- Терминал 2:
-BEGIN;
-UPDATE accounts SET balance = 1200.00 WHERE name = 'Alice';
-COMMIT;
-
--- Терминал 1:
-SELECT * FROM accounts WHERE name = 'Alice';  -- Видим новое значение!
-COMMIT;
-
--- 5. Демонстрация неповторяемого чтения на уровне READ COMMITTED
--- Терминал 1:
-BEGIN;
-SELECT balance FROM accounts WHERE name = 'Bob';  -- balance = 500
-
--- Терминал 2:
-UPDATE accounts SET balance = 600.00 WHERE name = 'Bob';
-
--- Терминал 1:
-SELECT balance FROM accounts WHERE name = 'Bob';  -- balance = 600 (изменилось!)
-COMMIT;
-
--- 6. Демонстрация фантомного чтения на уровне READ COMMITTED
--- Терминал 1:
-BEGIN;
-SELECT COUNT(*) FROM accounts;  -- COUNT = 2
-
--- Терминал 2:
-INSERT INTO accounts (name, balance) VALUES ('Charlie', 750.00);
-
--- Терминал 1:
-SELECT COUNT(*) FROM accounts;  -- COUNT = 3 (появилась новая строка!)
-COMMIT;
-
--- 7. Установка уровня изоляции REPEATABLE READ
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT * FROM accounts;
-
--- Терминал 2:
-BEGIN;
-UPDATE accounts SET balance = 1500.00 WHERE name = 'Alice';
-COMMIT;
-
--- Терминал 1:
-SELECT * FROM accounts;  -- Видим старые значения!
-COMMIT;
-
--- 8. Попытка обновления на уровне REPEATABLE READ
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT balance FROM accounts WHERE name = 'Alice';  -- 1000
-
--- Терминал 2:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-UPDATE accounts SET balance = balance + 100 WHERE name = 'Alice';
-COMMIT;
-
--- Терминал 1:
-UPDATE accounts SET balance = balance + 200 WHERE name = 'Alice';  -- ОШИБКА!
--- ERROR:  could not serialize access due to concurrent update
-
--- 9. Демонстрация отсутствия фантомного чтения на REPEATABLE READ
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT COUNT(*) FROM accounts;
-
--- Терминал 2:
-INSERT INTO accounts (name, balance) VALUES ('Dave', 800.00);
-
--- Терминал 1:
-SELECT COUNT(*) FROM accounts;  -- Количество не изменилось!
-COMMIT;
-
--- 10. Установка уровня изоляции SERIALIZABLE
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-SELECT SUM(balance) FROM accounts;  -- Пусть = 3000
-
--- Терминал 2:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-SELECT SUM(balance) FROM accounts;  -- = 3000
-INSERT INTO accounts (name, balance) VALUES ('Eve', 400.00);
-COMMIT;
-
--- Терминал 1:
-INSERT INTO accounts (name, balance) VALUES ('Frank', 350.00);
-COMMIT;  -- ОШИБКА!
--- ERROR:  could not serialize access due to read/write dependencies among transactions
-
--- 11. Демонстрация успешной сериализации
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-UPDATE accounts SET balance = balance * 1.1 WHERE name = 'Alice';
-COMMIT;
-
--- Терминал 2:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-UPDATE accounts SET balance = balance * 1.05 WHERE name = 'Bob';
-COMMIT;  -- Успешно (разные строки)
-
--- 12. Просмотр конфликтов сериализации
-SELECT * FROM pg_stat_database WHERE datname = 'lab3_isolation';
-
--- 13. Установка уровня изоляции для сессии
-SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SHOW default_transaction_isolation;
-
--- 14. Демонстрация ROLLBACK
-BEGIN;
-UPDATE accounts SET balance = 0 WHERE name = 'Alice';
-SELECT * FROM accounts;
-ROLLBACK;  -- Отменяем изменения
-SELECT * FROM accounts;  -- Данные восстановлены
-
--- 15. Использование SAVEPOINT
-BEGIN;
-UPDATE accounts SET balance = balance + 100 WHERE name = 'Alice';
-SAVEPOINT my_savepoint;
-UPDATE accounts SET balance = balance + 100 WHERE name = 'Bob';
--- Отменяем только последнее изменение
-ROLLBACK TO SAVEPOINT my_savepoint;
-COMMIT;  -- Сохраняем только изменение для Alice
-
--- 16. Просмотр активных транзакций
-SELECT
-    pid,
-    usename,
-    application_name,
-    state,
-    query,
-    xact_start,
-    state_change
-FROM pg_stat_activity
-WHERE datname = 'lab3_isolation' AND state != 'idle';
-```
+**Что требуется:**
+Продемонстрировать, что на уровне изоляции Read Committed не предотвращается аномалия фантомного чтения и неповторяющееся чтение. Показать, что нет аномалий грязного чтения и потерянных обновлений.
 
 ---
 
-## Подробное объяснение команд
+### Задание 1.1: Демонстрация фантомного чтения (Phantom Read) на уровне Read Committed
 
-### 1-2. Создание тестовой среды
+**Что требуется:**
+Показать, что на уровне изоляции Read Committed возникает аномалия фантомного чтения - при повторном выполнении запроса в транзакции появляются или исчезают новые строки, добавленные другой транзакцией.
+
+#### Последовательность команд
 
 ```sql
-CREATE DATABASE lab3_isolation;
-\c lab3_isolation
+-- Терминал 1: Начинаем транзакцию на уровне READ COMMITTED
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
 
-CREATE TABLE accounts (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(50),
-    balance DECIMAL(10,2)
-);
+-- Терминал 1: Первый запрос - считаем все полисы со статусом 'active'
+SELECT COUNT(*) FROM insurance_system.policies WHERE status = 'active';
 
-INSERT INTO accounts (name, balance) VALUES
-    ('Alice', 1000.00),
-    ('Bob', 500.00);
+-- Терминал 2: В другом окне psql добавляем новый активный полис
+INSERT INTO insurance_system.policies
+  (policy_number, client_id, agent_id, policy_type, start_date, end_date, premium, status)
+VALUES
+  ('POL-PHANTOM-001', 1, 1, 'health', '2024-01-16', '2025-01-16', 15000.00, 'active');
+COMMIT;
+
+-- Терминал 1: Повторяем тот же запрос в той же транзакции
+SELECT COUNT(*) FROM insurance_system.policies WHERE status = 'active';
+
+-- Терминал 1: Завершаем транзакцию
+COMMIT;
 ```
 
-**Что делает:** Создает базу данных и таблицу для демонстрации уровней изоляции транзакций.
+#### Детальное объяснение каждой команды
+
+1. **`BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;`**
+   - `BEGIN TRANSACTION` - начинает новую транзакцию
+   - `ISOLATION LEVEL READ COMMITTED` - устанавливает уровень изоляции "чтение зафиксированных данных"
+   - На этом уровне каждый запрос видит данные, зафиксированные на момент начала запроса (а не транзакции)
+   - Это уровень изоляции по умолчанию в PostgreSQL
+
+2. **`SELECT COUNT(*) FROM insurance_system.policies WHERE status = 'active';`**
+   - Первый запрос в транзакции, подсчитывающий количество активных полисов
+   - `COUNT(*)` - агрегатная функция, возвращающая количество строк
+   - `WHERE status = 'active'` - условие фильтрации только по активным полисам
+   - Запрос видит снимок данных на момент своего начала
+
+3. **`INSERT INTO insurance_system.policies ...`** (в Терминале 2)
+   - Вставка нового полиса со статусом 'active' в другой транзакции
+   - `COMMIT` немедленно фиксирует эту вставку
+   - После COMMIT эти данные становятся видимыми для новых запросов
+
+4. **Повторный `SELECT COUNT(*)`** (в Терминале 1)
+   - Тот же запрос, что и первый, но выполненный после COMMIT в Терминале 2
+   - **Результат будет отличаться** - появится "фантомная" строка
+   - Хотя мы находимся в той же транзакции, второй SELECT видит зафиксированные изменения
+   - Это демонстрирует **аномалию фантомного чтения**
+
+#### Объяснение результатов
+
+**Первый SELECT:**
+```
+ count
+-------
+   150
+```
+
+**Второй SELECT (после INSERT в другой транзакции):**
+```
+ count
+-------
+   151
+```
+
+**Вывод:** На уровне READ COMMITTED появилась "фантомная" строка - count увеличился с 150 до 151, хотя мы находимся в той же транзакции. Это происходит потому, что READ COMMITTED создает новый снимок данных для каждого запроса, а не для всей транзакции.
 
 ---
 
-### 3. Просмотр текущего уровня изоляции
+### Задание 1.2: Демонстрация неповторяющегося чтения (Non-repeatable Read) на уровне Read Committed
+
+**Что требуется:**
+Показать, что на уровне изоляции Read Committed возникает аномалия неповторяющегося чтения - при повторном чтении той же строки значения могут измениться.
+
+#### Последовательность команд
 
 ```sql
-SHOW default_transaction_isolation;
-```
+-- Терминал 1: Начинаем транзакцию READ COMMITTED
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
 
-**Что делает:** Отображает уровень изоляции по умолчанию для текущей сессии.
+-- Терминал 1: Читаем конкретный полис
+SELECT policy_number, premium, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-001';
 
-**Вывод:**
-```
- default_transaction_isolation
--------------------------------
- read committed
-```
-
-**Объяснение:** В PostgreSQL уровень изоляции по умолчанию — `read committed`.
-
-**Уровни изоляции в PostgreSQL:**
-- `read committed` — чтение зафиксированных данных (по умолчанию)
-- `repeatable read` — повторяемое чтение
-- `serializable` — сериализуемость
-- `read uncommitted` — фактически работает как read committed
-
-**Концепция:** Уровень изоляции определяет, как транзакция видит изменения, сделанные другими параллельными транзакциями.
-
----
-
-### 4. Демонстрация READ COMMITTED
-
-```sql
--- Терминал 1:
+-- Терминал 2: В другом окне изменяем премию этого полиса
 BEGIN;
-SELECT * FROM accounts WHERE name = 'Alice';  -- balance = 1000
+UPDATE insurance_system.policies
+SET premium = premium * 1.15
+WHERE policy_number = 'POL-2024-001';
+COMMIT;
 
--- Терминал 2:
+-- Терминал 1: Повторно читаем тот же полис в той же транзакции
+SELECT policy_number, premium, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-001';
+
+-- Терминал 1: Завершаем транзакцию
+COMMIT;
+```
+
+#### Детальное объяснение каждой команды
+
+1. **`SELECT policy_number, premium, status FROM insurance_system.policies WHERE policy_number = 'POL-2024-001';`**
+   - Первое чтение конкретного полиса в транзакции
+   - Возвращает три колонки: номер полиса, премию и статус
+   - `WHERE policy_number = 'POL-2024-001'` - точечная выборка по уникальному номеру
+   - Фиксируем текущее значение premium для последующего сравнения
+
+2. **`UPDATE insurance_system.policies SET premium = premium * 1.15 WHERE policy_number = 'POL-2024-001';`** (в Терминале 2)
+   - Увеличиваем премию на 15% (умножение на 1.15)
+   - `premium = premium * 1.15` - вычисляемое обновление на основе текущего значения
+   - Выполняется в отдельной транзакции и немедленно фиксируется
+   - После COMMIT изменение становится видимым
+
+3. **Повторный `SELECT`** (в Терминале 1)
+   - Тот же SELECT по тому же policy_number
+   - **Значение premium будет другим** - новое, увеличенное
+   - Это демонстрирует **аномалию неповторяющегося чтения**
+   - В одной транзакции мы получили разные данные при чтении одной записи
+
+#### Объяснение результатов
+
+**Первый SELECT:**
+```
+ policy_number | premium  | status
+---------------+----------+--------
+ POL-2024-001  | 20000.00 | active
+```
+
+**Второй SELECT (после UPDATE в другой транзакции):**
+```
+ policy_number | premium  | status
+---------------+----------+--------
+ POL-2024-001  | 23000.00 | active
+```
+
+**Объяснение колонок результата:**
+- `policy_number` - уникальный номер страхового полиса (остался прежним)
+- `premium` - размер страховой премии (изменился с 20000.00 на 23000.00)
+- `status` - статус полиса (остался 'active')
+
+**Вывод:** На уровне READ COMMITTED произошло неповторяющееся чтение - значение premium изменилось между двумя чтениями в одной транзакции. Это происходит потому, что каждый запрос видит последние зафиксированные данные, а не снимок на момент начала транзакции.
+
+---
+
+### Задание 1.3: Демонстрация отсутствия грязного чтения (No Dirty Read) на уровне Read Committed
+
+**Что требуется:**
+Показать, что на уровне изоляции Read Committed НЕ возникает аномалия грязного чтения - транзакция не видит незафиксированные изменения других транзакций.
+
+#### Последовательность команд
+
+```sql
+-- Терминал 1: Начинаем транзакцию READ COMMITTED
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+-- Терминал 1: Читаем текущее значение
+SELECT policy_number, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-002';
+
+-- Терминал 2: Начинаем транзакцию и изменяем статус, НО НЕ ФИКСИРУЕМ
 BEGIN;
-UPDATE accounts SET balance = 1200.00 WHERE name = 'Alice';
-COMMIT;
+UPDATE insurance_system.policies
+SET status = 'cancelled'
+WHERE policy_number = 'POL-2024-002';
 
--- Терминал 1:
-SELECT * FROM accounts WHERE name = 'Alice';  -- balance = 1200
-COMMIT;
-```
+-- НЕ ДЕЛАЕМ COMMIT! Транзакция остается открытой
 
-**Что делает:** Демонстрирует, что на уровне READ COMMITTED транзакция видит изменения, зафиксированные другими транзакциями.
+-- Терминал 1: Пытаемся прочитать изменённую запись
+SELECT policy_number, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-002';
 
-**Поведение READ COMMITTED:**
-- Каждый новый запрос в транзакции получает свежий снимок данных
-- Видны все изменения, зафиксированные до начала запроса
-- Не видны незафиксированные изменения других транзакций
-- Предотвращает грязное чтение (dirty read)
-
-**Концепция:** Это самый распространенный уровень изоляции, обеспечивающий баланс между консистентностью и производительностью.
-
----
-
-### 5. Демонстрация неповторяемого чтения (Non-repeatable Read)
-
-```sql
--- Терминал 1:
-BEGIN;
-SELECT balance FROM accounts WHERE name = 'Bob';  -- 500
-
--- Терминал 2:
-UPDATE accounts SET balance = 600.00 WHERE name = 'Bob';
-
--- Терминал 1:
-SELECT balance FROM accounts WHERE name = 'Bob';  -- 600 (изменилось!)
-COMMIT;
-```
-
-**Что делает:** Показывает аномалию неповторяемого чтения на уровне READ COMMITTED.
-
-**Объяснение аномалии:**
-- Первый SELECT возвращает balance = 500
-- Другая транзакция обновляет и фиксирует изменение
-- Второй SELECT в той же транзакции возвращает balance = 600
-- Повторное чтение той же строки дает разные результаты
-
-**Почему это происходит:** На уровне READ COMMITTED каждый запрос создает новый снимок данных, поэтому видит новые зафиксированные изменения.
-
-**Когда это проблема:**
-- Финансовые расчеты (сумма может измениться между проверкой и списанием)
-- Отчеты, требующие консистентного состояния данных
-- Бизнес-логика, зависящая от неизменности данных в транзакции
-
----
-
-### 6. Демонстрация фантомного чтения (Phantom Read)
-
-```sql
--- Терминал 1:
-BEGIN;
-SELECT COUNT(*) FROM accounts;  -- 2
-
--- Терминал 2:
-INSERT INTO accounts (name, balance) VALUES ('Charlie', 750.00);
-
--- Терминал 1:
-SELECT COUNT(*) FROM accounts;  -- 3
-COMMIT;
-```
-
-**Что делает:** Показывает аномалию фантомного чтения на уровне READ COMMITTED.
-
-**Объяснение аномалии:**
-- Первый запрос возвращает 2 строки
-- Другая транзакция вставляет новую строку
-- Второй запрос в той же транзакции возвращает 3 строки
-- "Фантомная" строка появилась в результате
-
-**Отличие от неповторяемого чтения:**
-- Неповторяемое чтение — изменение существующих строк
-- Фантомное чтение — появление/исчезновение строк, соответствующих условию
-
-**Когда это проблема:**
-- Агрегирующие отчеты (SUM, COUNT, AVG)
-- Пагинация результатов
-- Проверка бизнес-правил на множестве строк
-
----
-
-### 7. Уровень изоляции REPEATABLE READ
-
-```sql
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT * FROM accounts;  -- Видим текущее состояние
-
--- Терминал 2:
-BEGIN;
-UPDATE accounts SET balance = 1500.00 WHERE name = 'Alice';
-COMMIT;
-
--- Терминал 1:
-SELECT * FROM accounts;  -- Видим старые значения!
-COMMIT;
-```
-
-**Что делает:** Демонстрирует, что на уровне REPEATABLE READ транзакция видит консистентный снимок данных.
-
-**Вывод в Терминале 1 (оба SELECT):**
-```
- id | name  | balance
-----+-------+---------
-  1 | Alice | 1000.00
-  2 | Bob   |  500.00
-```
-
-**Поведение REPEATABLE READ:**
-- Снимок данных создается один раз в начале транзакции
-- Все запросы в транзакции видят одно и то же состояние данных
-- Изменения других транзакций невидимы, даже после их фиксации
-- Предотвращает неповторяемое и фантомное чтение
-
-**Концепция:** Транзакция работает с "замороженным" состоянием базы данных, что обеспечивает полную консистентность в рамках транзакции.
-
----
-
-### 8. Конфликт обновлений на REPEATABLE READ
-
-```sql
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT balance FROM accounts WHERE name = 'Alice';  -- 1000
-
--- Терминал 2:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-UPDATE accounts SET balance = balance + 100 WHERE name = 'Alice';
-COMMIT;
-
--- Терминал 1:
-UPDATE accounts SET balance = balance + 200 WHERE name = 'Alice';
--- ОШИБКА!
-```
-
-**Вывод ошибки:**
-```
-ERROR:  could not serialize access due to concurrent update
-DETAIL:  Concurrent update to the same row.
-HINT:  The transaction might succeed if retried.
-```
-
-**Что произошло:**
-1. Транзакция 1 читает balance = 1000
-2. Транзакция 2 обновляет строку (balance = 1100) и коммитится
-3. Транзакция 1 пытается обновить ту же строку
-4. PostgreSQL обнаруживает конфликт и отменяет транзакцию 1
-
-**Почему это происходит:**
-- На уровне REPEATABLE READ транзакция не может обновить строку, которая была изменена после начала транзакции
-- Это предотвращает lost updates (потерянные обновления)
-- Приложение должно обработать ошибку и повторить транзакцию
-
-**Концепция:** PostgreSQL использует метод first-updater-wins для разрешения конфликтов. Первая транзакция, которая фиксирует изменение, выигрывает; последующие получают ошибку сериализации.
-
----
-
-### 9. Отсутствие фантомного чтения на REPEATABLE READ
-
-```sql
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT COUNT(*) FROM accounts;  -- 2
-
--- Терминал 2:
-INSERT INTO accounts (name, balance) VALUES ('Dave', 800.00);
-
--- Терминал 1:
-SELECT COUNT(*) FROM accounts;  -- Все еще 2!
-COMMIT;
-```
-
-**Что делает:** Показывает, что на уровне REPEATABLE READ фантомное чтение предотвращено.
-
-**Объяснение:**
-- Транзакция 1 видит снимок данных на момент своего начала
-- Новая строка, вставленная транзакцией 2, невидима для транзакции 1
-- Это обеспечивает консистентность агрегирующих запросов
-
-**Концепция:** В PostgreSQL REPEATABLE READ фактически предотвращает все аномалии, кроме аномалий сериализации. Это сильнее, чем требует стандарт SQL.
-
----
-
-### 10. Уровень изоляции SERIALIZABLE
-
-```sql
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-SELECT SUM(balance) FROM accounts;  -- 3000
-
--- Терминал 2:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-SELECT SUM(balance) FROM accounts;  -- 3000
-INSERT INTO accounts (name, balance) VALUES ('Eve', 400.00);
-COMMIT;
-
--- Терминал 1:
-INSERT INTO accounts (name, balance) VALUES ('Frank', 350.00);
-COMMIT;
--- ERROR:  could not serialize access due to read/write dependencies among transactions
-```
-
-**Вывод ошибки:**
-```
-ERROR:  could not serialize access due to read/write dependencies among transactions
-DETAIL:  Reason code: Canceled on identification as a pivot, during commit attempt.
-HINT:  The transaction might succeed if retried.
-```
-
-**Что произошло:**
-1. Обе транзакции читают SUM(balance)
-2. Обе вставляют новые строки
-3. PostgreSQL обнаруживает, что результат выполнения этих транзакций отличается от их последовательного выполнения
-4. Одна из транзакций отменяется с ошибкой сериализации
-
-**Объяснение аномалии сериализации:**
-- Если обе транзакции выполнить последовательно, каждая увидела бы изменения предыдущей
-- Но при параллельном выполнении каждая работает со своим снимком
-- Это создает невозможную при последовательном выполнении ситуацию
-
-**Поведение SERIALIZABLE:**
-- Гарантирует, что результат параллельного выполнения транзакций эквивалентен некоторому их последовательному выполнению
-- Использует SSI (Serializable Snapshot Isolation) для обнаружения конфликтов
-- Самый строгий уровень изоляции
-- Требует повторных попыток при ошибках сериализации
-
-**Концепция:** SERIALIZABLE обеспечивает полную изоляцию транзакций, но требует дополнительных вычислительных ресурсов и обработки ошибок сериализации в приложении.
-
----
-
-### 11. Успешная сериализация
-
-```sql
--- Терминал 1:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-UPDATE accounts SET balance = balance * 1.1 WHERE name = 'Alice';
-COMMIT;  -- Успешно
-
--- Терминал 2:
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-UPDATE accounts SET balance = balance * 1.05 WHERE name = 'Bob';
-COMMIT;  -- Успешно
-```
-
-**Что делает:** Показывает, что транзакции, работающие с разными строками, не конфликтуют.
-
-**Объяснение:**
-- Транзакции обновляют разные строки
-- Нет read-write зависимостей между транзакциями
-- Обе могут быть выполнены последовательно в любом порядке с тем же результатом
-- Конфликта сериализации нет
-
-**Концепция:** SERIALIZABLE не блокирует все транзакции. Только транзакции с конфликтующими зависимостями чтения-записи получают ошибки.
-
----
-
-### 12. Просмотр конфликтов сериализации
-
-```sql
-SELECT * FROM pg_stat_database WHERE datname = 'lab3_isolation';
-```
-
-**Что делает:** Выводит статистику по базе данных, включая конфликты сериализации.
-
-**Вывод (релевантные колонки):**
-```
-    datname     | xact_commit | xact_rollback | conflicts | deadlocks
-----------------+-------------+---------------+-----------+-----------
- lab3_isolation |         125 |            15 |         3 |         0
-```
-
-**Объяснение колонок:**
-- `datname` — имя базы данных
-- `xact_commit` — количество зафиксированных транзакций
-- `xact_rollback` — количество откаченных транзакций
-- `conflicts` — количество конфликтов (включая сериализацию)
-- `deadlocks` — количество обнаруженных дедлоков
-
-**Концепция:** Мониторинг этих метрик помогает оценить, насколько часто возникают конфликты, и решить, подходит ли уровень SERIALIZABLE для приложения.
-
----
-
-### 13. Установка уровня изоляции для сессии
-
-```sql
-SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SHOW default_transaction_isolation;
-```
-
-**Что делает:** Устанавливает уровень изоляции по умолчанию для всех транзакций в текущей сессии.
-
-**Вывод:**
-```
- default_transaction_isolation
--------------------------------
- repeatable read
-```
-
-**Способы установки уровня изоляции:**
-
-1. **Для одной транзакции:**
-   ```sql
-   BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-   ```
-
-2. **Для сессии:**
-   ```sql
-   SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-   ```
-
-3. **Для всей базы данных:**
-   ```sql
-   ALTER DATABASE mydb SET default_transaction_isolation = 'repeatable read';
-   ```
-
-4. **В postgresql.conf (для всего кластера):**
-   ```
-   default_transaction_isolation = 'repeatable read'
-   ```
-
-**Концепция:** Выбор уровня изоляции зависит от требований приложения к консистентности и производительности.
-
----
-
-### 14. Демонстрация ROLLBACK
-
-```sql
-BEGIN;
-UPDATE accounts SET balance = 0 WHERE name = 'Alice';
-SELECT * FROM accounts WHERE name = 'Alice';  -- balance = 0
+-- Терминал 2: Откатываем изменения
 ROLLBACK;
-SELECT * FROM accounts WHERE name = 'Alice';  -- balance восстановлен
-```
 
-**Что делает:** Показывает откат транзакции, отменяющий все изменения.
-
-**Вывод:**
-```
--- После UPDATE внутри транзакции:
- id | name  | balance
-----+-------+---------
-  1 | Alice |    0.00
-
--- После ROLLBACK:
- id | name  | balance
-----+-------+---------
-  1 | Alice | 1000.00
-```
-
-**Объяснение:**
-- `ROLLBACK` отменяет все изменения, сделанные в транзакции
-- Данные возвращаются к состоянию до `BEGIN`
-- Освобождаются все блокировки
-
-**Концепция:** ROLLBACK — ключевой механизм обеспечения атомарности транзакций. Либо все изменения фиксируются (COMMIT), либо все отменяются (ROLLBACK).
-
----
-
-### 15. Использование SAVEPOINT
-
-```sql
-BEGIN;
-UPDATE accounts SET balance = balance + 100 WHERE name = 'Alice';
-SAVEPOINT my_savepoint;
-UPDATE accounts SET balance = balance + 100 WHERE name = 'Bob';
-ROLLBACK TO SAVEPOINT my_savepoint;  -- Отменяем только последнее изменение
-COMMIT;  -- Сохраняем изменение для Alice
-```
-
-**Что делает:** Демонстрирует частичный откат транзакции с помощью точек сохранения.
-
-**Результат:**
-- Баланс Alice увеличен на 100 (изменение сохранено)
-- Баланс Bob не изменился (изменение откачено)
-
-**Команды для работы с SAVEPOINT:**
-- `SAVEPOINT name` — создать точку сохранения
-- `ROLLBACK TO SAVEPOINT name` — откатиться к точке сохранения
-- `RELEASE SAVEPOINT name` — удалить точку сохранения (без отката)
-
-**Концепция:** SAVEPOINT позволяет создавать вложенные транзакции и откатывать только часть изменений. Полезно для обработки ошибок внутри сложных транзакций.
-
----
-
-### 16. Просмотр активных транзакций
-
-```sql
-SELECT
-    pid,
-    usename,
-    application_name,
-    state,
-    query,
-    xact_start,
-    state_change
-FROM pg_stat_activity
-WHERE datname = 'lab3_isolation' AND state != 'idle';
-```
-
-**Что делает:** Выводит информацию о всех активных подключениях и транзакциях.
-
-**Вывод (пример):**
-```
-  pid  | usename  | application_name |        state        |          query           |          xact_start           |         state_change
--------+----------+------------------+---------------------+--------------------------+-------------------------------+-------------------------------
- 12345 | postgres | psql             | active              | SELECT * FROM accounts;  | 2026-01-15 10:30:15.123456+00 | 2026-01-15 10:30:17.789012+00
- 12346 | postgres | psql             | idle in transaction | <IDLE> in transaction    | 2026-01-15 10:29:45.654321+00 | 2026-01-15 10:30:10.111111+00
-```
-
-**Объяснение колонок:**
-- `pid` — ID процесса PostgreSQL
-- `usename` — имя пользователя
-- `application_name` — имя приложения (psql, JDBC, и т.д.)
-- `state` — состояние подключения:
-  - `active` — выполняется запрос
-  - `idle` — ожидает команды
-  - `idle in transaction` — транзакция открыта, но не выполняется запрос
-  - `idle in transaction (aborted)` — транзакция откачена из-за ошибки
-- `query` — текст последнего/текущего запроса
-- `xact_start` — время начала текущей транзакции (NULL если нет транзакции)
-- `state_change` — время последнего изменения состояния
-
-**Важность мониторинга:**
-- **"idle in transaction"** — частая проблема. Открытые транзакции держат блокировки и снимки данных, препятствуя VACUUM
-- **Долгие транзакции** — могут вызывать раздувание таблиц и блокировки
-- **Активные запросы** — помогают найти медленные операции
-
-**Концепция:** pg_stat_activity — основной инструмент мониторинга активности в PostgreSQL. Критически важен для диагностики проблем с производительностью и блокировками.
-
----
-
-## Технический концепт: Транзакции и изоляция
-
-### Свойства ACID
-
-PostgreSQL обеспечивает ACID-свойства транзакций:
-
-1. **Atomicity (Атомарность):**
-   - Транзакция выполняется полностью или не выполняется вообще
-   - COMMIT фиксирует все изменения
-   - ROLLBACK отменяет все изменения
-   - Реализуется через журнал WAL (Write-Ahead Log)
-
-2. **Consistency (Согласованность):**
-   - Транзакция переводит базу из одного консистентного состояния в другое
-   - Проверяются ограничения (constraints)
-   - Триггеры выполняются в контексте транзакции
-
-3. **Isolation (Изолированность):**
-   - Параллельные транзакции не видят промежуточные состояния друг друга
-   - Реализуется через MVCC и уровни изоляции
-   - Разные уровни изоляции обеспечивают разные гарантии
-
-4. **Durability (Долговечность):**
-   - После COMMIT изменения сохраняются даже при сбое
-   - Реализуется через fsync и журнал WAL
-   - Возможен асинхронный режим для повышения производительности
-
-### Сравнение уровней изоляции
-
-| Уровень изоляции | Грязное чтение | Неповторяемое чтение | Фантомное чтение | Аномалия сериализации | Производительность |
-|------------------|----------------|----------------------|------------------|-----------------------|--------------------|
-| Read Uncommitted | Нет (в PG)     | Да                   | Да               | Да                    | Высокая            |
-| Read Committed   | Нет            | Да                   | Да               | Да                    | Высокая            |
-| Repeatable Read  | Нет            | Нет                  | Нет (в PG)       | Да                    | Средняя            |
-| Serializable     | Нет            | Нет                  | Нет              | Нет                   | Низкая             |
-
-**Примечание:** В PostgreSQL READ UNCOMMITTED эквивалентен READ COMMITTED, а REPEATABLE READ предотвращает фантомное чтение (сильнее стандарта SQL).
-
-### Механизм SSI (Serializable Snapshot Isolation)
-
-SERIALIZABLE в PostgreSQL использует SSI для обнаружения конфликтов:
-
-1. **Отслеживание зависимостей:**
-   - Записывается, какие транзакции читали/писали какие данные
-   - Строятся графы зависимостей между транзакциями
-
-2. **Обнаружение циклов:**
-   - Если образуется цикл зависимостей (rw-conflict), возникает риск аномалии
-   - Одна из транзакций отменяется
-
-3. **Предикатные блокировки:**
-   - Отслеживаются не только конкретные строки, но и диапазоны (предикаты)
-   - Предотвращает фантомное чтение на уровне SERIALIZABLE
-
-### Выбор уровня изоляции
-
-**READ COMMITTED — используйте когда:**
-- Нужна высокая производительность
-- Приложение толерантно к неповторяемому чтению
-- Короткие транзакции, где консистентность не критична
-- Примеры: веб-приложения, простые CRUD-операции
-
-**REPEATABLE READ — используйте когда:**
-- Нужна консистентность данных внутри транзакции
-- Отчеты и аналитика
-- Финансовые операции (с обработкой ошибок сериализации)
-- Примеры: генерация отчетов, бухгалтерские системы
-
-**SERIALIZABLE — используйте когда:**
-- Требуется полная изоляция
-- Сложная бизнес-логика с множественными проверками
-- Критичные финансовые транзакции
-- Примеры: банковские системы, инвентаризация с резервированием
-
-### Практические рекомендации
-
-1. **Держите транзакции короткими:**
-   - Долгие транзакции держат блокировки
-   - Препятствуют VACUUM
-   - Увеличивают вероятность конфликтов
-
-2. **Обрабатывайте ошибки сериализации:**
-   ```python
-   max_retries = 3
-   for attempt in range(max_retries):
-       try:
-           # Выполнить транзакцию
-           break
-       except SerializationError:
-           if attempt == max_retries - 1:
-               raise
-           # Повторить
-   ```
-
-3. **Используйте правильный уровень изоляции:**
-   - Не используйте SERIALIZABLE везде (избыточно и медленно)
-   - READ COMMITTED достаточен для большинства случаев
-   - Повышайте уровень только там, где нужна дополнительная консистентность
-
-4. **Мониторинг:**
-   - Отслеживайте долгие транзакции через pg_stat_activity
-   - Мониторьте "idle in transaction" (утечка транзакций)
-   - Проверяйте конфликты сериализации в pg_stat_database
-
-5. **Избегайте дедлоков:**
-   - Всегда захватывайте блокировки в одном порядке
-   - Используйте lock_timeout для обнаружения
-   - Логируйте и анализируйте дедлоки
-
-### Практические сценарии
-
-**Сценарий 1: Система бронирования**
-```sql
--- Неправильно (READ COMMITTED):
-BEGIN;
-SELECT available FROM seats WHERE id = 42;  -- available = 1
--- Другая транзакция может забронировать место здесь!
-UPDATE seats SET available = 0 WHERE id = 42;
-COMMIT;
-
--- Правильно (блокировка):
-BEGIN;
-SELECT available FROM seats WHERE id = 42 FOR UPDATE;  -- Блокируем строку
-UPDATE seats SET available = 0 WHERE id = 42;
-COMMIT;
-
--- Или REPEATABLE READ/SERIALIZABLE с обработкой ошибок
-```
-
-**Сценарий 2: Перевод между счетами**
-```sql
--- SERIALIZABLE гарантирует консистентность
-BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
-UPDATE accounts SET balance = balance - 100 WHERE id = 1;
-UPDATE accounts SET balance = balance + 100 WHERE id = 2;
--- Если другая транзакция читала/писала те же счета, получим ошибку
+-- Терминал 1: Читаем ещё раз и завершаем транзакцию
+SELECT policy_number, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-002';
 COMMIT;
 ```
 
-**Сценарий 3: Генерация отчета**
+#### Детальное объяснение каждой команды
+
+1. **Первый `SELECT`** (в Терминале 1)
+   - Читаем текущий статус полиса POL-2024-002
+   - Фиксируем исходное состояние для сравнения
+
+2. **`UPDATE ... SET status = 'cancelled'`** (в Терминале 2, без COMMIT)
+   - Изменяем статус полиса на 'cancelled'
+   - Транзакция **не фиксируется** - изменение остается незавершенным
+   - Эти данные являются "грязными" (dirty) - они не зафиксированы и могут быть откатаны
+
+3. **Второй `SELECT`** (в Терминале 1)
+   - Пытаемся прочитать полис, измененный в незавершенной транзакции
+   - **Результат будет прежним** - READ COMMITTED не видит незафиксированные изменения
+   - Запрос **блокируется не будет**, но покажет старое значение 'active'
+
+4. **`ROLLBACK`** (в Терминале 2)
+   - Откатываем незафиксированные изменения
+   - Полис остается со статусом 'active'
+   - Подтверждаем, что "грязные" данные никогда не были видны
+
+#### Объяснение результатов
+
+**Все три SELECT в Терминале 1 вернут одинаковый результат:**
+```
+ policy_number | status
+---------------+--------
+ POL-2024-002  | active
+```
+
+**Объяснение колонок результата:**
+- `policy_number` - уникальный номер страхового полиса
+- `status` - статус полиса (остается 'active' во всех трех чтениях)
+
+**Вывод:** На уровне READ COMMITTED **нет** аномалии грязного чтения. Транзакция в Терминале 1 не видела незафиксированное изменение status='cancelled' из Терминала 2. PostgreSQL гарантирует, что на всех уровнях изоляции (включая READ COMMITTED) грязное чтение невозможно благодаря архитектуре MVCC.
+
+---
+
+### Задание 1.4: Демонстрация отсутствия потерянных обновлений (No Lost Update) на уровне Read Committed
+
+**Что требуется:**
+Показать, что на уровне изоляции Read Committed НЕ возникает аномалия потерянного обновления - изменения одной транзакции не теряются при конкурентном обновлении.
+
+#### Последовательность команд
+
 ```sql
--- REPEATABLE READ для консистентного снимка
+-- Терминал 1: Начинаем транзакцию и читаем текущую сумму платежа
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SELECT payment_id, amount
+FROM insurance_system.payments
+WHERE payment_id = 1;
+
+-- Терминал 2: Начинаем конкурентную транзакцию
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SELECT payment_id, amount
+FROM insurance_system.payments
+WHERE payment_id = 1;
+
+-- Терминал 1: Обновляем сумму платежа (например, добавляем штраф 500)
+UPDATE insurance_system.payments
+SET amount = amount + 500
+WHERE payment_id = 1;
+COMMIT;
+
+-- Терминал 2: Пытаемся также обновить (добавляем пени 300)
+-- Эта команда БЛОКИРУЕТСЯ до завершения транзакции в Терминале 1
+UPDATE insurance_system.payments
+SET amount = amount + 300
+WHERE payment_id = 1;
+
+-- После COMMIT в Терминале 1, UPDATE в Терминале 2 разблокируется
+-- и применяется к НОВОМУ значению (уже включающему +500)
+
+COMMIT;
+
+-- Проверяем финальный результат
+SELECT payment_id, amount
+FROM insurance_system.payments
+WHERE payment_id = 1;
+```
+
+#### Детальное объяснение каждой команды
+
+1. **`SELECT payment_id, amount FROM insurance_system.payments WHERE payment_id = 1;`**
+   - Обе транзакции читают исходное значение amount
+   - Предположим, исходное значение amount = 5000.00
+   - Обе транзакции планируют обновления на основе этого значения
+
+2. **`UPDATE ... SET amount = amount + 500 WHERE payment_id = 1;`** (в Терминале 1)
+   - Первая транзакция добавляет 500 к текущему amount
+   - `amount + 500` вычисляется как 5000 + 500 = 5500
+   - После COMMIT эта версия строки фиксируется
+
+3. **`UPDATE ... SET amount = amount + 300 WHERE payment_id = 1;`** (в Терминале 2)
+   - Вторая транзакция пытается обновить ту же строку
+   - **Запрос блокируется** (ждет завершения первой транзакции)
+   - После COMMIT в Терминале 1, блокировка снимается
+   - PostgreSQL **перечитывает** новое значение amount (5500, а не 5000)
+   - Вычисление `amount + 300` выполняется как 5500 + 300 = 5800
+   - **Обновление первой транзакции НЕ потеряно!**
+
+4. **Финальный `SELECT`**
+   - Проверяем результат после обоих обновлений
+
+#### Объяснение результатов
+
+**Исходное значение (в обеих транзакциях):**
+```
+ payment_id | amount
+------------+---------
+          1 | 5000.00
+```
+
+**После COMMIT в Терминале 1:**
+```
+ payment_id | amount
+------------+---------
+          1 | 5500.00
+```
+
+**Финальное значение (после COMMIT в Терминале 2):**
+```
+ payment_id | amount
+------------+---------
+          1 | 5800.00
+```
+
+**Объяснение колонок результата:**
+- `payment_id` - уникальный идентификатор платежа
+- `amount` - сумма платежа (5000 → 5500 → 5800)
+
+**Вывод:** На уровне READ COMMITTED **нет** аномалии потерянного обновления. PostgreSQL использует механизм блокировок: вторая транзакция блокируется при попытке UPDATE, затем после разблокировки перечитывает актуальную версию строки и применяет свое изменение. Результат: 5000 + 500 + 300 = 5800, оба обновления учтены.
+
+**Концептуальное объяснение:**
+PostgreSQL предотвращает потерянные обновления через механизм row-level locks (блокировок на уровне строк). Когда транзакция выполняет UPDATE, она устанавливает эксклюзивную блокировку на строку. Другие транзакции, пытающиеся изменить эту строку, ждут снятия блокировки и затем работают с актуальной версией данных.
+
+---
+
+## Задание 2: Демонстрация уровня изоляции Repeatable Read
+
+**Что требуется:**
+Открыть транзакцию с уровнем изоляции Repeatable Read. Показать, что нет аномалии неповторяющегося чтения и фантомного чтения. Подобрать требование согласованности уровня приложения, для которого будет значимым данный уровень изоляции. Продемонстрировать на примере.
+
+---
+
+### Задание 2.1: Демонстрация отсутствия неповторяющегося чтения на уровне Repeatable Read
+
+**Что требуется:**
+Показать, что на уровне изоляции Repeatable Read НЕ возникает аномалия неповторяющегося чтения - повторное чтение той же строки возвращает те же данные.
+
+#### Последовательность команд
+
+```sql
+-- Терминал 1: Начинаем транзакцию REPEATABLE READ
 BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
-SELECT SUM(amount) FROM orders WHERE date = '2026-01-15';  -- 10000
-SELECT COUNT(*) FROM orders WHERE date = '2026-01-15';     -- 100
--- Данные консистентны, даже если другие транзакции добавляют заказы
+
+-- Терминал 1: Первое чтение полиса
+SELECT policy_number, premium, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-003';
+
+-- Терминал 2: В другом окне изменяем премию
+BEGIN;
+UPDATE insurance_system.policies
+SET premium = premium * 1.20
+WHERE policy_number = 'POL-2024-003';
 COMMIT;
+
+-- Терминал 1: Повторное чтение в той же транзакции
+SELECT policy_number, premium, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-003';
+
+-- Терминал 1: Завершаем транзакцию
+COMMIT;
+
+-- Терминал 1: После завершения транзакции увидим новые данные
+SELECT policy_number, premium, status
+FROM insurance_system.policies
+WHERE policy_number = 'POL-2024-003';
 ```
+
+#### Детальное объяснение каждой команды
+
+1. **`BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;`**
+   - Начинаем транзакцию с уровнем изоляции REPEATABLE READ
+   - На этом уровне создается снимок данных на момент **первого запроса** в транзакции
+   - Все последующие запросы в этой транзакции видят тот же снимок
+
+2. **Первый `SELECT`** (в Терминале 1)
+   - Читаем полис POL-2024-003
+   - Фиксируется снимок базы данных на этот момент времени
+   - Все последующие SELECT в этой транзакции будут видеть данные на этот момент
+
+3. **`UPDATE ... SET premium = premium * 1.20 WHERE policy_number = 'POL-2024-003';`** (в Терминале 2)
+   - Увеличиваем премию на 20% и фиксируем изменение
+   - Это изменение видно для новых транзакций
+   - Но **не видно** для транзакции в Терминале 1, которая уже создала свой снимок
+
+4. **Повторный `SELECT`** (в Терминале 1, до COMMIT)
+   - **Результат идентичен первому чтению**
+   - Изменение premium, сделанное в Терминале 2, не видно
+   - Это демонстрирует **отсутствие аномалии неповторяющегося чтения**
+
+5. **`SELECT` после COMMIT** (в Терминале 1)
+   - После завершения транзакции начинается новая (автоматическая)
+   - Теперь видны все зафиксированные изменения
+
+#### Объяснение результатов
+
+**Первый и второй SELECT в транзакции REPEATABLE READ:**
+```
+ policy_number | premium  | status
+---------------+----------+--------
+ POL-2024-003  | 18000.00 | active
+```
+
+**SELECT после COMMIT (в новой автоматической транзакции):**
+```
+ policy_number | premium  | status
+---------------+----------+--------
+ POL-2024-003  | 21600.00 | active
+```
+
+**Объяснение колонок результата:**
+- `policy_number` - уникальный номер полиса
+- `premium` - размер премии (18000 в снимке, 21600 в новой транзакции)
+- `status` - статус полиса
+
+**Вывод:** На уровне REPEATABLE READ **нет** аномалии неповторяющегося чтения. Оба SELECT внутри транзакции вернули одинаковое значение premium (18000.00), несмотря на UPDATE в другой транзакции. Снимок данных зафиксирован на момент первого запроса и не меняется до конца транзакции.
+
+---
+
+### Задание 2.2: Демонстрация отсутствия фантомного чтения на уровне Repeatable Read
+
+**Что требуется:**
+Показать, что на уровне изоляции Repeatable Read НЕ возникает аномалия фантомного чтения - при повторном запросе не появляются новые строки, добавленные другими транзакциями.
+
+#### Последовательность команд
+
+```sql
+-- Терминал 1: Начинаем транзакцию REPEATABLE READ
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+-- Терминал 1: Первый запрос - считаем активные полисы типа 'health'
+SELECT COUNT(*) FROM insurance_system.policies
+WHERE policy_type = 'health' AND status = 'active';
+
+-- Также выведем конкретные полисы для наглядности
+SELECT policy_number, policy_type, status
+FROM insurance_system.policies
+WHERE policy_type = 'health' AND status = 'active'
+ORDER BY policy_number;
+
+-- Терминал 2: Добавляем новый полис типа 'health'
+BEGIN;
+INSERT INTO insurance_system.policies
+  (policy_number, client_id, agent_id, policy_type, start_date, end_date, premium, status)
+VALUES
+  ('POL-HEALTH-999', 2, 2, 'health', '2024-01-16', '2025-01-16', 22000.00, 'active');
+COMMIT;
+
+-- Терминал 1: Повторяем те же запросы в той же транзакции
+SELECT COUNT(*) FROM insurance_system.policies
+WHERE policy_type = 'health' AND status = 'active';
+
+SELECT policy_number, policy_type, status
+FROM insurance_system.policies
+WHERE policy_type = 'health' AND status = 'active'
+ORDER BY policy_number;
+
+-- Терминал 1: Завершаем транзакцию
+COMMIT;
+
+-- Терминал 1: Проверяем после завершения транзакции
+SELECT COUNT(*) FROM insurance_system.policies
+WHERE policy_type = 'health' AND status = 'active';
+```
+
+#### Детальное объяснение каждой команды
+
+1. **Первый `SELECT COUNT(*)`** (в Терминале 1)
+   - Подсчитываем количество активных полисов типа 'health'
+   - Создается снимок данных на этот момент
+   - Предположим, результат = 45
+
+2. **`SELECT policy_number, policy_type, status`** (в Терминале 1)
+   - Выводим конкретный список полисов для наглядности
+   - Этот список зафиксирован в снимке транзакции
+
+3. **`INSERT INTO insurance_system.policies ...`** (в Терминале 2)
+   - Добавляем новый полис 'POL-HEALTH-999' типа 'health' со статусом 'active'
+   - COMMIT фиксирует это изменение
+   - Эта строка становится видимой для новых транзакций
+
+4. **Повторный `SELECT COUNT(*)`** (в Терминале 1)
+   - **Результат будет тем же** = 45
+   - Новая строка, вставленная в Терминале 2, **не видна**
+   - Это демонстрирует **отсутствие фантомного чтения**
+
+5. **Повторный `SELECT policy_number...`** (в Терминале 1)
+   - Список полисов остается прежним
+   - 'POL-HEALTH-999' не появляется в результате
+
+#### Объяснение результатов
+
+**Первый и второй COUNT в транзакции REPEATABLE READ:**
+```
+ count
+-------
+    45
+```
+
+**COUNT после COMMIT (в новой автоматической транзакции):**
+```
+ count
+-------
+    46
+```
+
+**Список полисов внутри транзакции (оба раза одинаковый):**
+```
+ policy_number   | policy_type | status
+-----------------+-------------+--------
+ POL-HEALTH-001  | health      | active
+ POL-HEALTH-002  | health      | active
+ ...
+ POL-HEALTH-045  | health      | active
+(45 строк)
+```
+
+**Список полисов после COMMIT:**
+```
+ policy_number   | policy_type | status
+-----------------+-------------+--------
+ POL-HEALTH-001  | health      | active
+ ...
+ POL-HEALTH-045  | health      | active
+ POL-HEALTH-999  | health      | active
+(46 строк)
+```
+
+**Вывод:** На уровне REPEATABLE READ **нет** аномалии фантомного чтения. Несмотря на INSERT в другой транзакции, повторные запросы в транзакции REPEATABLE READ вернули тот же результат (45 строк). Новая "фантомная" строка не появилась, так как снимок данных зафиксирован на момент первого запроса.
+
+---
+
+### Задание 2.3: Практический пример применения Repeatable Read - формирование страхового отчета
+
+**Что требуется:**
+Подобрать требование согласованности уровня приложения, для которого будет значимым уровень изоляции Repeatable Read. Продемонстрировать на примере.
+
+#### Сценарий применения
+
+**Бизнес-требование:**
+Страховая компания формирует ежемесячный финансовый отчет, который включает:
+- Общую сумму премий по всем активным полисам
+- Общую сумму выплат по претензиям
+- Баланс (премии минус выплаты)
+- Количество активных полисов
+- Средний размер премии
+
+**Проблема на уровне READ COMMITTED:**
+При формировании отчета запросы выполняются последовательно. Если между запросами другие транзакции вносят изменения (добавляют платежи, создают новые полисы, изменяют премии), разные части отчета будут видеть разные состояния базы, что приведет к **несогласованному отчету**.
+
+**Решение:** Использовать уровень изоляции REPEATABLE READ для обеспечения согласованности всех данных отчета.
+
+#### Последовательность команд
+
+```sql
+-- Терминал 1: Формируем отчет на уровне REPEATABLE READ
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+-- Шаг 1: Подсчитываем общую сумму премий по активным полисам
+SELECT SUM(premium) AS total_premiums, COUNT(*) AS active_policies_count
+FROM insurance_system.policies
+WHERE status = 'active';
+
+-- Терминал 2: Пока формируется отчет, добавляется новый полис
+BEGIN;
+INSERT INTO insurance_system.policies
+  (policy_number, client_id, agent_id, policy_type, start_date, end_date, premium, status)
+VALUES
+  ('POL-NEW-REPORT', 3, 1, 'auto', '2024-01-16', '2025-01-16', 35000.00, 'active');
+COMMIT;
+
+-- Терминал 2: Добавляется платеж по новому полису
+BEGIN;
+INSERT INTO insurance_system.payments
+  (policy_id, payment_date, amount, payment_method)
+VALUES
+  ((SELECT policy_id FROM insurance_system.policies WHERE policy_number = 'POL-NEW-REPORT'),
+   '2024-01-16', 35000.00, 'bank_transfer');
+COMMIT;
+
+-- Терминал 1: Шаг 2 - подсчитываем общую сумму платежей
+SELECT SUM(amount) AS total_payments
+FROM insurance_system.payments
+WHERE payment_date >= '2024-01-01';
+
+-- Терминал 1: Шаг 3 - вычисляем баланс
+SELECT
+  (SELECT SUM(premium) FROM insurance_system.policies WHERE status = 'active') AS total_premiums,
+  (SELECT SUM(amount) FROM insurance_system.payments WHERE payment_date >= '2024-01-01') AS total_payments,
+  (SELECT SUM(premium) FROM insurance_system.policies WHERE status = 'active') -
+  (SELECT SUM(amount) FROM insurance_system.payments WHERE payment_date >= '2024-01-01') AS balance;
+
+-- Терминал 1: Шаг 4 - средний размер премии
+SELECT AVG(premium) AS avg_premium
+FROM insurance_system.policies
+WHERE status = 'active';
+
+-- Терминал 1: Фиксируем отчет
+COMMIT;
+
+-- Терминал 1: Проверяем, что изменения теперь видны
+SELECT COUNT(*) FROM insurance_system.policies WHERE status = 'active';
+```
+
+#### Детальное объяснение каждой команды
+
+1. **`BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;`**
+   - Начинаем транзакцию для формирования отчета
+   - Уровень REPEATABLE READ гарантирует, что все запросы увидят согласованное состояние БД
+   - Снимок фиксируется при первом SELECT
+
+2. **`SELECT SUM(premium) AS total_premiums, COUNT(*) AS active_policies_count`**
+   - Первый запрос отчета - сумма премий и количество активных полисов
+   - `SUM(premium)` - агрегатная функция суммирования премий
+   - `COUNT(*)` - подсчет количества строк
+   - Создается снимок данных на этот момент времени
+
+3. **`INSERT INTO insurance_system.policies ...`** и **`INSERT INTO insurance_system.payments ...`** (в Терминале 2)
+   - Конкурентная транзакция добавляет новый полис и платеж
+   - Эти изменения фиксируются и видны для новых транзакций
+   - Но **не видны** для транзакции отчета в Терминале 1
+
+4. **`SELECT SUM(amount) AS total_payments`**
+   - Второй запрос отчета - сумма всех платежей за период
+   - **Важно:** Видит тот же снимок данных, что и первый запрос
+   - Новый платеж в 35000.00 из Терминала 2 **не учитывается**
+
+5. **Комбинированный SELECT для баланса**
+   - Вычисляет баланс как разницу между премиями и платежами
+   - Все подзапросы видят один и тот же согласованный снимок
+   - **Баланс корректный**, так как не учитывается ни новый полис, ни новый платеж
+
+6. **`SELECT AVG(premium) AS avg_premium`**
+   - Средний размер премии рассчитывается по тому же снимку
+   - Новый полис с премией 35000.00 не учитывается
+
+#### Объяснение результатов
+
+**Шаг 1 - Премии и количество (снимок на момент начала отчета):**
+```
+ total_premiums | active_policies_count
+----------------+-----------------------
+    2500000.00  |                   150
+```
+
+**Шаг 2 - Платежи (тот же снимок):**
+```
+ total_payments
+----------------
+    1800000.00
+```
+
+**Шаг 3 - Баланс (согласованные данные):**
+```
+ total_premiums | total_payments | balance
+----------------+----------------+----------
+    2500000.00  |    1800000.00  | 700000.00
+```
+
+**Шаг 4 - Средняя премия (тот же снимок):**
+```
+  avg_premium
+----------------
+     16666.67
+```
+
+**После COMMIT - проверка (видим новые данные):**
+```
+ count
+-------
+   151
+```
+
+**Объяснение колонок результатов:**
+
+- `total_premiums` - общая сумма премий по всем активным полисам в рублях
+- `active_policies_count` - количество активных полисов
+- `total_payments` - общая сумма выплат за указанный период
+- `balance` - финансовый баланс (премии минус выплаты)
+- `avg_premium` - средний размер страховой премии
+
+**Вывод и практическое значение:**
+
+На уровне REPEATABLE READ все четыре запроса отчета видели **одно и то же согласованное состояние** базы данных. Несмотря на то, что во время формирования отчета были добавлены новый полис и платеж, они не повлияли на расчеты. Это критически важно для финансовых отчетов:
+
+1. **Согласованность данных:** Все показатели отчета (премии, платежи, баланс, средние значения) рассчитаны на один момент времени
+
+2. **Корректность вычислений:** Баланс = 700000.00 корректен, так как и премии (2500000), и платежи (1800000) взяты из одного снимка. На уровне READ COMMITTED баланс мог бы быть некорректным из-за включения только части новых данных.
+
+3. **Аудит и отчетность:** Финансовые отчеты можно воспроизвести - снимок данных логически соответствует конкретному моменту времени
+
+4. **Предотвращение ошибок:** Исключается ситуация, когда в отчете учитывается премия по новому полису (в total_premiums), но не учитывается платеж (в total_payments), что привело бы к завышению баланса
+
+**Бизнес-кейсы, где REPEATABLE READ критичен:**
+- Формирование бухгалтерских балансов
+- Расчет налоговых деклараций
+- Аудиторские проверки
+- Формирование отчетов для регуляторов
+- Сверка данных между системами
+
+---
+
+## Концептуальное объяснение уровней изоляции
+
+### Read Committed (уровень по умолчанию в PostgreSQL)
+
+**Принцип работы:**
+- Каждый SQL-запрос видит снимок данных на момент своего начала
+- Видны только зафиксированные (committed) данные
+- Разные запросы в одной транзакции могут видеть разные состояния БД
+
+**Гарантии:**
+- ✅ Нет грязного чтения (dirty read) - не видны незафиксированные изменения
+- ✅ Нет потерянных обновлений (lost update) - благодаря блокировкам строк
+- ❌ Возможно неповторяющееся чтение (non-repeatable read)
+- ❌ Возможно фантомное чтение (phantom read)
+
+**Когда использовать:** Большинство OLTP-приложений, где важна производительность и допустимы изменения данных между запросами в одной транзакции.
+
+### Repeatable Read
+
+**Принцип работы:**
+- Снимок данных создается при первом запросе в транзакции
+- Все последующие запросы видят тот же снимок
+- Изменения других транзакций (даже зафиксированные) не видны
+
+**Гарантии:**
+- ✅ Нет грязного чтения (dirty read)
+- ✅ Нет потерянных обновлений (lost update)
+- ✅ Нет неповторяющегося чтения (non-repeatable read)
+- ✅ Нет фантомного чтения (phantom read) - в PostgreSQL
+
+**Особенность PostgreSQL:**
+В отличие от стандарта SQL, PostgreSQL предотвращает и фантомное чтение на уровне REPEATABLE READ благодаря архитектуре MVCC (Multi-Version Concurrency Control).
+
+**Когда использовать:**
+- Формирование отчетов, требующих согласованности данных
+- Финансовые операции с множественными запросами
+- Аналитические запросы, где важна целостность данных
+- Бизнес-логика, требующая стабильного представления данных
+
+### Serializable (самый строгий уровень)
+
+**Принцип работы:**
+- Гарантирует, что результат параллельных транзакций эквивалентен их последовательному выполнению
+- PostgreSQL использует Serializable Snapshot Isolation (SSI)
+- Транзакции могут откатываться при обнаружении конфликтов сериализации
+
+**Гарантии:**
+- ✅ Все гарантии REPEATABLE READ
+- ✅ Нет аномалий сериализации
+
+**Когда использовать:** Критически важные операции, где необходима полная изолированность (например, банковские переводы с множественными проверками).
+
+### Механизм MVCC в PostgreSQL
+
+PostgreSQL использует MVCC (Multi-Version Concurrency Control) для реализации уровней изоляции:
+
+1. **Версионирование строк:** Каждая транзакция видит свою версию данных
+2. **Снимки (snapshots):** Фиксируют состояние БД на определенный момент
+3. **Нет блокировок чтения:** Читатели не блокируют писателей и наоборот
+4. **xmin/xmax:** Каждая строка содержит информацию о транзакциях создания и удаления
+
+Это обеспечивает высокую производительность при конкурентном доступе и надежную изоляцию транзакций.
+
+---
+
+## Инструкция по выполнению лабораторной работы на Windows 10
+
+### Работа с двумя терминалами
+
+Для демонстрации конкурентных транзакций необходимо открыть два окна psql:
+
+**Способ 1: Через cmd**
+```cmd
+# Терминал 1
+cmd
+psql -U postgres -d your_database
+
+# Терминал 2 (открыть новое окно cmd)
+cmd
+psql -U postgres -d your_database
+```
+
+**Способ 2: Через PowerShell**
+```powershell
+# Терминал 1
+powershell
+psql -U postgres -d your_database
+
+# Терминал 2 (открыть новое окно PowerShell)
+powershell
+psql -U postgres -d your_database
+```
+
+**Способ 3: Использовать pgAdmin 4**
+- Открыть Query Tool (два окна)
+- Каждое окно представляет отдельную сессию
+
+### Проверка текущего уровня изоляции
+
+```sql
+SHOW default_transaction_isolation;
+```
+
+### Установка уровня изоляции для всей сессии
+
+```sql
+SET default_transaction_isolation = 'repeatable read';
+```
+
+### Установка уровня изоляции для конкретной транзакции
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+-- или
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+-- или
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+```
+
+### Проверка активных транзакций
+
+```sql
+SELECT pid, state, query_start, state_change, query
+FROM pg_stat_activity
+WHERE state = 'active' OR state = 'idle in transaction';
+```
+
+---
+
+## Выводы
+
+В данной лабораторной работе были продемонстрированы:
+
+1. **На уровне READ COMMITTED:**
+   - Возникают аномалии фантомного и неповторяющегося чтения
+   - Не возникают аномалии грязного чтения и потерянных обновлений
+   - Подходит для большинства OLTP-приложений
+
+2. **На уровне REPEATABLE READ:**
+   - Не возникают аномалии неповторяющегося и фантомного чтения
+   - Все запросы в транзакции видят согласованный снимок данных
+   - Критически важен для формирования финансовых отчетов и аналитики
+
+3. **Практическое применение:**
+   - Формирование согласованных отчетов требует REPEATABLE READ
+   - PostgreSQL эффективно реализует изоляцию через MVCC
+   - Выбор уровня изоляции зависит от бизнес-требований
+
+Правильный выбор уровня изоляции обеспечивает баланс между производительностью и согласованностью данных в приложении.
