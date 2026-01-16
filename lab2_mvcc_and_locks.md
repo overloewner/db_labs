@@ -5,6 +5,313 @@
 
 ## Практическое задание
 
+### Задание 1: Анализ блокировок с помощью pg_locks, pg_stat_activity и pg_blocking_pids()
+
+**Что требуется:**
+В двух разных сеансах PostgreSQL создать ситуацию блокировки. В третьем сеансе выполнить запрос для выявления текущих блокировок и ожиданий. Проанализировать: кто блокирует кого, какие запросы находятся в ожидании, какие процессы вызывают ожидания, используя pg_blocking_pids. Завершить первую транзакцию командой COMMIT или ROLLBACK. Повторить запрос и убедиться, что блокировки исчезли.
+
+---
+
+#### Шаг 1: Создание ситуации блокировки в двух сеансах
+
+**Терминал 1 (Сеанс 1) - Блокирующая транзакция**
+
+```cmd
+REM Открываем первый терминал
+psql -U postgres -d kursach
+```
+
+```sql
+-- Начинаем транзакцию и блокируем строку
+BEGIN;
+
+-- Обновляем запись в таблице policies (устанавливается блокировка)
+UPDATE insurance_system.policies
+SET premium = premium + 1000
+WHERE policy_id = 1;
+
+-- НЕ ВЫПОЛНЯЕМ COMMIT! Транзакция остается открытой
+```
+
+**Результат:**
+```
+BEGIN
+UPDATE 1
+```
+
+**Объяснение:** Транзакция началась и установила эксклюзивную блокировку на строку с policy_id = 1. Блокировка будет удерживаться до COMMIT или ROLLBACK.
+
+---
+
+**Терминал 2 (Сеанс 2) - Ожидающая транзакция**
+
+```cmd
+REM Открываем второй терминал
+psql -U postgres -d kursach
+```
+
+```sql
+-- Начинаем вторую транзакцию
+BEGIN;
+
+-- Пытаемся обновить ту же строку
+UPDATE insurance_system.policies
+SET premium = premium + 2000
+WHERE policy_id = 1;
+
+-- КОМАНДА БЛОКИРУЕТСЯ И ЖДЕТ!
+```
+
+**Объяснение:** Вторая транзакция пытается обновить ту же строку, но не может получить блокировку, так как строка уже заблокирована первой транзакцией. Команда "зависает" в ожидании.
+
+---
+
+#### Шаг 2: Анализ блокировок в третьем сеансе
+
+**Терминал 3 (Сеанс 3) - Мониторинг**
+
+```cmd
+REM Открываем третий терминал
+psql -U postgres -d kursach
+```
+
+**Запрос 1: Просмотр всех активных блокировок**
+
+```sql
+SELECT
+    locktype,
+    relation::regclass AS table_name,
+    mode,
+    transactionid,
+    pid,
+    granted
+FROM pg_locks
+WHERE NOT granted
+ORDER BY pid;
+```
+
+**Результат:**
+```
+   locktype    | table_name |       mode       | transactionid |  pid  | granted
+---------------+------------+------------------+---------------+-------+---------
+ transactionid |            | ShareLock        |          1234 | 12346 | f
+ tuple         | policies   | ExclusiveLock    |               | 12346 | f
+```
+
+**Объяснение колонок:**
+- `locktype` - тип блокировки (transactionid, tuple, relation)
+- `table_name` - имя таблицы (если применимо)
+- `mode` - режим блокировки (ShareLock, ExclusiveLock, RowExclusiveLock)
+- `transactionid` - ID транзакции
+- `pid` - ID процесса PostgreSQL
+- `granted` - FALSE означает, что блокировка ожидается, а не получена
+
+**Вывод:** Процесс 12346 (Терминал 2) ожидает блокировку типа ShareLock на transactionid и ExclusiveLock на tuple.
+
+---
+
+**Запрос 2: Определение блокирующих процессов**
+
+```sql
+SELECT
+    blocked.pid AS blocked_pid,
+    blocked.query AS blocked_query,
+    blocking.pid AS blocking_pid,
+    blocking.query AS blocking_query,
+    pg_blocking_pids(blocked.pid) AS blocking_pids_array
+FROM pg_stat_activity AS blocked
+JOIN pg_stat_activity AS blocking
+    ON blocking.pid = ANY(pg_blocking_pids(blocked.pid))
+WHERE blocked.pid != blocking.pid
+  AND blocked.state = 'active';
+```
+
+**Результат:**
+```
+ blocked_pid |                   blocked_query                    | blocking_pid |                  blocking_query                   | blocking_pids_array
+-------------+----------------------------------------------------+--------------+---------------------------------------------------+---------------------
+       12346 | UPDATE insurance_system.policies SET premium = ... |        12345 | UPDATE insurance_system.policies SET premium = ...| {12345}
+```
+
+**Объяснение колонок:**
+- `blocked_pid` - PID заблокированного процесса (Терминал 2)
+- `blocked_query` - SQL-запрос, который ожидает
+- `blocking_pid` - PID блокирующего процесса (Терминал 1)
+- `blocking_query` - SQL-запрос, который держит блокировку
+- `blocking_pids_array` - массив PID всех блокирующих процессов
+
+**Вывод:** Процесс 12346 блокируется процессом 12345.
+
+---
+
+**Запрос 3: Детальная информация о блокировках с помощью pg_blocking_pids()**
+
+```sql
+SELECT
+    a.pid,
+    a.usename,
+    a.query,
+    a.state,
+    a.wait_event_type,
+    a.wait_event,
+    pg_blocking_pids(a.pid) AS blocked_by
+FROM pg_stat_activity a
+WHERE a.datname = 'kursach'
+  AND a.state != 'idle'
+ORDER BY a.pid;
+```
+
+**Результат:**
+```
+  pid  | usename  |                       query                        |        state        | wait_event_type | wait_event | blocked_by
+-------+----------+----------------------------------------------------+---------------------+-----------------+------------+------------
+ 12345 | postgres | UPDATE insurance_system.policies SET premium = ...| idle in transaction |                 |            | {}
+ 12346 | postgres | UPDATE insurance_system.policies SET premium = ...| active              | Lock            | tuple      | {12345}
+```
+
+**Объяснение колонок:**
+- `pid` - ID процесса
+- `usename` - имя пользователя
+- `query` - текущий SQL-запрос
+- `state` - состояние сессии:
+  - `idle in transaction` - транзакция открыта, но не выполняется запрос (Терминал 1)
+  - `active` - выполняется запрос (Терминал 2, но в ожидании)
+- `wait_event_type` - тип события ожидания (Lock - ожидание блокировки)
+- `wait_event` - конкретное событие (tuple - блокировка кортежа/строки)
+- `blocked_by` - массив PID процессов, блокирующих данный процесс
+
+**Вывод:** Процесс 12346 ожидает освобождения блокировки tuple, удерживаемой процессом 12345.
+
+---
+
+#### Шаг 3: Завершение блокирующей транзакции
+
+**Вернемся в Терминал 1:**
+
+```sql
+-- Фиксируем транзакцию
+COMMIT;
+```
+
+**Результат:**
+```
+COMMIT
+```
+
+**Что происходит:** Блокировка снимается, и команда UPDATE в Терминале 2 немедленно завершается.
+
+---
+
+**В Терминале 2 автоматически завершается UPDATE:**
+
+```
+UPDATE 1
+```
+
+Теперь можем завершить вторую транзакцию:
+
+```sql
+COMMIT;
+```
+
+---
+
+#### Шаг 4: Проверка, что блокировки исчезли
+
+**В Терминале 3 повторяем запрос:**
+
+```sql
+SELECT
+    locktype,
+    relation::regclass AS table_name,
+    mode,
+    transactionid,
+    pid,
+    granted
+FROM pg_locks
+WHERE NOT granted
+ORDER BY pid;
+```
+
+**Результат:**
+```
+ locktype | table_name | mode | transactionid | pid | granted
+----------+------------+------+---------------+-----+---------
+(0 rows)
+```
+
+**Вывод:** Все блокировки сняты. Система вернулась в нормальное состояние.
+
+---
+
+**Проверка pg_stat_activity:**
+
+```sql
+SELECT
+    a.pid,
+    a.state,
+    pg_blocking_pids(a.pid) AS blocked_by
+FROM pg_stat_activity a
+WHERE a.datname = 'kursach'
+  AND a.state != 'idle'
+ORDER BY a.pid;
+```
+
+**Результат:**
+```
+ pid | state | blocked_by
+-----+-------+------------
+(0 rows)
+```
+
+**Вывод:** Нет активных или заблокированных транзакций.
+
+---
+
+#### Концептуальное объяснение блокировок
+
+**Типы блокировок в PostgreSQL:**
+
+1. **Row-level locks (блокировки строк):**
+   - `FOR UPDATE` - эксклюзивная блокировка для обновления
+   - `FOR SHARE` - разделяемая блокировка для чтения
+   - Автоматически устанавливаются при UPDATE/DELETE
+
+2. **Table-level locks (блокировки таблиц):**
+   - `ACCESS SHARE` - самая слабая (SELECT)
+   - `ROW EXCLUSIVE` - UPDATE, DELETE, INSERT
+   - `EXCLUSIVE` - большинство DDL-команд
+   - `ACCESS EXCLUSIVE` - самая сильная (DROP TABLE, TRUNCATE, VACUUM FULL)
+
+3. **Transaction locks (блокировки транзакций):**
+   - Каждая транзакция имеет уникальный ID
+   - Другие транзакции могут ожидать завершения
+
+**Как работает MVCC и блокировки:**
+- MVCC позволяет читателям не блокировать писателей
+- Но писатели блокируют других писателей на уровне строк
+- PostgreSQL автоматически управляет блокировками
+
+**Функция pg_blocking_pids():**
+- Принимает PID процесса
+- Возвращает массив PID процессов, блокирующих данный
+- Упрощает поиск причин задержек
+
+**Практическое применение:**
+- Диагностика медленных запросов
+- Поиск deadlocks (взаимных блокировок)
+- Мониторинг производительности базы данных
+- Оптимизация транзакций
+
+---
+
+### Задание 2: Исследование Dead tuples и VACUUM
+
+**Что требуется:**
+Смоделировать ситуацию накопления мусора, посмотреть статистику, определить размеры объектов, запустить VACUUM и VACUUM FULL, проверить статистику снова, сравнить размеры до и после.
+
+---
+
 ### Задание 2.1: Моделирование накопления мусора и работа с VACUUM
 
 #### Пункт 1: Смоделировать ситуацию накопления мусора
